@@ -481,22 +481,20 @@ func (rf *Raft) startAppendEntries()  {
 			reply := &AppendEntriesReply{}
 			ok := rf.sendAppendEntries(i, heartBeatArgs, reply)
 			if ok {
+				rf.mu.Lock()
+				if reply.Term > rf.currentTerm {
+					rf.becomeFollower(reply.Term)
+				}
+
 				if reply.Success {
-					rf.mu.Lock()
 					atomic.AddInt32(&replicaCount, 1)
 					rf.nextIndex[i] = mayNextIdx + 1
-					rf.mu.Unlock()
 				} else {
-					rf.mu.Lock()
-					if reply.Term > rf.currentTerm {
-						rf.becomeFollower(reply.Term)
-						return
-					}
 					if 0 < rf.nextIndex[i] {
 						rf.nextIndex[i]--
 					}
-					rf.mu.Unlock()
 				}
+				rf.mu.Unlock()
 
 			}
 		}(i)
@@ -506,6 +504,7 @@ func (rf *Raft) startAppendEntries()  {
 	rf.mu.Lock()
 	if int32(peerCount/2) <=replicaCount {
 		rf.commitIndex = mayNextIdx
+		rf.applyLogEntry()
 	}
 	rf.mu.Unlock()
 }
