@@ -56,8 +56,9 @@ const (
 type ApplyState int;
 
 const (
-	Applied = iota
-	Commited
+	NEW_INSERT = iota
+	COMMITED
+	APPLIES
 )
 
 type LogEntry struct {
@@ -366,45 +367,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, isLeader
 	}
 
-	cmdLog := make([]LogEntry, 0)
-	newLogEntry := LogEntry{rf.currentTerm, command, Commited}
-	cmdLog = append(cmdLog, newLogEntry)
-	repliCmd := AppendEntriesArgs{rf.currentTerm, rf.me,rf.getLastLogIdx(), rf.getLastLogTerm(),
-		cmdLog, rf.commitIndex}
-
-	m := &sync.Mutex{}
-	c := sync.NewCond(m)
-	var appendedCount int32 = 0;
-	for idx, _ := range rf.peers {
-		if idx == rf.me {
-			continue
-		}
-		go func(idx int) {
-			reply := &AppendEntriesReply{}
-			ok := false
-			for !ok {
-				ok = rf.sendAppendEntries(idx, repliCmd, reply)
-
-				log.Printf("ok:%d %d in start %s from %d", ok, rf.me, toJsonString(reply), idx)
-				if ok && reply.Success {
-					atomic.AddInt32(&appendedCount, 1)
-					if int32(len(rf.peers)/2) <= atomic.LoadInt32(&appendedCount) {
-						m.Lock()
-						c.Broadcast()
-						m.Unlock()
-					}
-					return
-				}
-			}
-		}(idx)
-
-	}
-	m.Lock()
-	c.Wait()
-	log.Printf("%d start append", rf.me)
+	newLogEntry := LogEntry{rf.currentTerm, command, NEW_INSERT}
 	rf.log = append(rf.log, newLogEntry)
-	rf.commitIndex++
-	rf.applyLogEntry()
 	return rf.getLastLogIdx(), rf.getLastLogTerm(), isLeader
 }
 
@@ -413,7 +377,7 @@ func (rf *Raft) applyLogEntry()  {
 	//defer rf.mu.Unlock()
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 
-		rf.log[i].State = Applied
+		rf.log[i].State = APPLIES
 		rf.applyCh <- ApplyMsg{i, rf.log[i].Command, false, make([]byte, 0)}
 		log.Printf("%d send applyMsg %s", rf.me, toJsonString(rf.log[i]))
 		rf.lastApplied = i
@@ -489,29 +453,64 @@ func (rf *Raft) startElection()  {
 	}
 }
 
+func (rf *Raft) startAppendEntries()  {
+
+	mayNextIdx := len(rf.log) - 1
+	var wg sync.WaitGroup;
+	var replicaCount int32 = 0;
+	peerCount := len(rf.peers)
+	for i := 0; i < peerCount; i++ {
+		if i == rf.me {
+			continue
+		}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rf.mu.Lock()
+			logs := rf.log[rf.nextIndex[i]:mayNextIdx]
+			prevLogIdx := rf.nextIndex[i] - 1
+			prevLogTerm := 0
+			if 0 <= prevLogIdx && prevLogIdx < len(rf.log) {
+				prevLogTerm = rf.log[prevLogIdx].Term
+			}
+			heartBeatArgs := AppendEntriesArgs{rf.currentTerm, rf.me,prevLogIdx, prevLogTerm, logs, rf.commitIndex}
+			rf.mu.Unlock()
+			reply := &AppendEntriesReply{}
+			ok := rf.sendAppendEntries(i, heartBeatArgs, reply)
+			if ok {
+				if reply.Success {
+					rf.mu.Lock()
+					atomic.AddInt32(&replicaCount, 1)
+					rf.nextIndex[i] = mayNextIdx
+					rf.mu.Unlock()
+				} else {
+					rf.mu.Lock()
+					if reply.Term > rf.currentTerm {
+						rf.becomeFollower(reply.Term)
+						return
+					}
+					rf.nextIndex[i]--
+					rf.mu.Unlock()
+				}
+
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	rf.mu.Lock()
+	if int32(peerCount/2) <=replicaCount {
+		rf.commitIndex = mayNextIdx
+	}
+	rf.mu.Unlock()
+}
+
 func (rf *Raft) runAsLeader() bool {
 	select {
 	case <-rf.quitCh:
 		return false
 	case <-time.After(rf.heartbeatTimeout):
-		rf.mu.Lock()
-		heartBeatArgs := AppendEntriesArgs{rf.currentTerm, rf.me,0, 0, make([]LogEntry, 0), rf.commitIndex}
-		rf.mu.Unlock()
-
-		for i := 0; i < len(rf.peers); i++ {
-			if i == rf.me {
-				continue
-			}
-			go func(i int) {
-				heatBeatReply := &AppendEntriesReply{}
-				rf.sendAppendEntries(i, heartBeatArgs, heatBeatReply)
-				if heatBeatReply.Term > rf.currentTerm {
-					rf.becomeFollower(heatBeatReply.Term)
-					return
-				}
-			}(i)
-
-		}
+		rf.startAppendEntries()
 	}
 	return true
 }
@@ -589,7 +588,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh;
 	rf.quitCh = make(chan int, 1)
 	rf.heartbeatCh = make(chan int, 1)
-	rf.log = append(rf.log, LogEntry{0, 0, Applied})
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
