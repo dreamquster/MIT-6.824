@@ -375,12 +375,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) applyLogEntry()  {
 	//rf.mu.Lock()
 	//defer rf.mu.Unlock()
-	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+	for rf.lastApplied <= rf.commitIndex  {
 
-		rf.log[i].State = APPLIES
-		rf.applyCh <- ApplyMsg{i, rf.log[i].Command, false, make([]byte, 0)}
-		log.Printf("%d send applyMsg %s", rf.me, toJsonString(rf.log[i]))
-		rf.lastApplied = i
+		rf.log[rf.lastApplied].State = APPLIES
+		rf.applyCh <- ApplyMsg{rf.lastApplied, rf.log[rf.lastApplied].Command, false, make([]byte, 0)}
+		log.Printf("%d send applyMsg %s", rf.me, toJsonString(rf.log[rf.lastApplied]))
+		rf.lastApplied++
 	}
 
 }
