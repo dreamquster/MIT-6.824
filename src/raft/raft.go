@@ -211,7 +211,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 
 	reply.Term = rf.currentTerm
-	if nil == args.Entries || 0 == len(args.Entries) {
+	if nil == args.Entries || 0 == len(args.Entries) || args.PrevLogIndex < 0 {
 		reply.Success = true
 		return
 	}
@@ -467,7 +467,10 @@ func (rf *Raft) startAppendEntries()  {
 		go func(i int) {
 			defer wg.Done()
 			rf.mu.Lock()
-			logs := rf.log[rf.nextIndex[i]:mayNextIdx]
+			logs := make([]LogEntry, 0)
+			if rf.nextIndex[i] < mayNextIdx + 1 {
+				logs = rf.log[rf.nextIndex[i]:mayNextIdx + 1]
+			}
 			prevLogIdx := rf.nextIndex[i] - 1
 			prevLogTerm := 0
 			if 0 <= prevLogIdx && prevLogIdx < len(rf.log) {
@@ -481,7 +484,7 @@ func (rf *Raft) startAppendEntries()  {
 				if reply.Success {
 					rf.mu.Lock()
 					atomic.AddInt32(&replicaCount, 1)
-					rf.nextIndex[i] = mayNextIdx
+					rf.nextIndex[i] = mayNextIdx + 1
 					rf.mu.Unlock()
 				} else {
 					rf.mu.Lock()
@@ -489,7 +492,9 @@ func (rf *Raft) startAppendEntries()  {
 						rf.becomeFollower(reply.Term)
 						return
 					}
-					rf.nextIndex[i]--
+					if 0 < rf.nextIndex[i] {
+						rf.nextIndex[i]--
+					}
 					rf.mu.Unlock()
 				}
 
