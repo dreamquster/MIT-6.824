@@ -26,6 +26,8 @@ import (
 	"fmt"
 	"encoding/json"
 	"sync/atomic"
+	"bytes"
+	"encoding/gob"
 )
 
 // import "bytes"
@@ -84,7 +86,7 @@ type Raft struct {
 	currentTerm	int				 // latest Term server has, increase monotonically;
 	votedFor	int 			 //	candidatedId that received vote in current Term, -1 if none
 	log			[]LogEntry		// log enteries
-
+								// transient fields =====
 	commitIndex 	int			// index of highest log entry known to be commited
 	lastApplied	int				// index of highest log entry applied to state machine
 
@@ -128,6 +130,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -143,6 +152,16 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.votedFor)
+	d.Decode(&rf.log)
 }
 
 
@@ -206,6 +225,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer dropAndSet(rf.heartbeatCh, kHearbeat)
+	defer rf.persist()
 
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
@@ -267,6 +287,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer dropAndSet(rf.heartbeatCh, kHearbeat)
+	defer rf.persist()
 
 	if args.Term > rf.currentTerm {
 		rf.becomeFollower(args.Term)
@@ -293,6 +314,7 @@ func dropAndSet(ch chan int, v int) {
 }
 
 func (rf *Raft) becomeFollower(term int) {
+	defer rf.persist()
 	log.Printf("%d become follower", rf.me)
 	rf.role = FOLLOWER
 	rf.currentTerm = term
@@ -360,6 +382,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	isLeader = rf.role == LEADER
 	if rf.role != LEADER {
 		return index, term, isLeader
