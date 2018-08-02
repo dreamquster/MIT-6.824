@@ -192,9 +192,17 @@ func min(x, y int) int {
 	}
 	return y
 }
+
+func max(x,y int) int  {
+	if x > y {
+		return x
+	}
+	return y
+}
+
 //
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)  {
-	//log.Printf("%d received appendEntires %s", rf.me, toJsonString(arg))
+	//log.Printf("%d received appendEntires %s", rf.me, toJsonString(args))
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer dropAndSet(rf.heartbeatCh, kHearbeat)
@@ -211,14 +219,8 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 
 	reply.Term = rf.currentTerm
-	if nil == args.Entries || 0 == len(args.Entries) || args.PrevLogIndex < 0 {
-		reply.Success = true
-		return
-	}
-
-
 	if args.PrevLogIndex >= len(rf.log) ||
-		(rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+		(0 <= args.PrevLogIndex && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
 			reply.Success = false
 			return
 	}
@@ -245,19 +247,15 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 }
 
 func (rf *Raft) getLastLogTerm() int {
-	lastLogIdx := len(rf.log) - 1;
+	lastLogIdx := rf.getLastLogIdx()
 	if lastLogIdx < 0 {
 		return 0
 	}
 	return rf.log[lastLogIdx].Term
 }
 
-func (rf *Raft) getLastLogIdx() int {
-	lastLogIdx := len(rf.log) - 1;
-	if lastLogIdx < 0 {
-		return 0
-	}
-	return lastLogIdx
+func (rf *Raft)  getLastLogIdx() int {
+	return len(rf.log) - 1;
 }
 
 //
@@ -276,7 +274,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
 	reply.VoteGranted = false
 	if rf.currentTerm == args.Term && (rf.votedFor == kVotedNone || rf.votedFor == args.CandidateId) &&
-		(rf.getLastLogTerm() < args.LastLogTerm || rf.getLastLogIdx() <= args.LastLogIndex) {
+		(rf.getLastLogTerm() < args.LastLogTerm || (rf.getLastLogTerm() == args.LastLogTerm && rf.getLastLogIdx() <= args.LastLogIndex)) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 
@@ -369,18 +367,17 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	newLogEntry := LogEntry{rf.currentTerm, command, NEW_INSERT}
 	rf.log = append(rf.log, newLogEntry)
-	return rf.getLastLogIdx(), rf.getLastLogTerm(), isLeader
+	return rf.getLastLogIdx() + 1, rf.getLastLogTerm(), isLeader
 }
 
 func (rf *Raft) applyLogEntry()  {
 	//rf.mu.Lock()
 	//defer rf.mu.Unlock()
-	for rf.lastApplied <= rf.commitIndex  {
-
-		rf.log[rf.lastApplied].State = APPLIES
-		rf.applyCh <- ApplyMsg{rf.lastApplied, rf.log[rf.lastApplied].Command, false, make([]byte, 0)}
-		log.Printf("%d send applyMsg %s", rf.me, toJsonString(rf.log[rf.lastApplied]))
-		rf.lastApplied++
+	for i:= rf.lastApplied + 1;  i <= rf.commitIndex; i++  {
+		rf.log[i].State = APPLIES
+		rf.applyCh <- ApplyMsg{i + 1, rf.log[i].Command, false, make([]byte, 0)}
+		log.Printf("%d send applyMsg %s at index %d", rf.me, toJsonString(rf.log[i]), i)
+		rf.lastApplied = i;
 	}
 
 }
@@ -395,10 +392,9 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
 
-const kLeaderHeartPeriod  = 10 * time.Millisecond
-const kFollowerHeartTimeout = 2 * kLeaderHeartPeriod
+const kLeaderHeartPeriod  = 40 * time.Millisecond
 const kMinElectTime = 300
-const kMaxElectTime = 400
+const kMaxElectTime = 500
 
 func toJsonString(v interface{}) string{
 	b, err := json.Marshal(v)
@@ -412,11 +408,8 @@ func toJsonString(v interface{}) string{
 func (rf *Raft) startElection()  {
 	rf.mu.Lock();
 	rf.currentTerm++
-	lastLogIdx := len(rf.log)
-	lastLogTerm := 0
-	if 0 < lastLogIdx {
-		lastLogTerm = rf.log[lastLogIdx - 1].Term;
-	}
+	lastLogIdx := rf.getLastLogIdx()
+	lastLogTerm := rf.getLastLogTerm()
 	winBallot := len(rf.peers) / 2 + len(rf.peers)%2;
 	rf.votedFor = rf.me
 	requestVoteArgs := RequestVoteArgs{rf.currentTerm, rf.me, lastLogIdx, lastLogTerm}
@@ -429,23 +422,25 @@ func (rf *Raft) startElection()  {
 		}
 		go func(idx int) {
 			reply := &RequestVoteReply{};
-			rf.sendRequestVote(idx, requestVoteArgs, reply)
-			log.Printf("%d receive reply:%s from node %d", rf.me, toJsonString(reply), idx)
+			ok := rf.sendRequestVote(idx, requestVoteArgs, reply)
 
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
-			if reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
-				rf.role = FOLLOWER
-				return
-			}
-			if reply.VoteGranted && rf.role == CANDIDATE {
-				atomic.AddInt32(&collectBallot, 1)
-				if int32(winBallot) <= atomic.LoadInt32(&collectBallot) {
-					log.Printf("%d become leader", rf.me)
-					rf.role = LEADER
-					dropAndSet(rf.heartbeatCh, kHearbeat)
+			if ok {
+				log.Printf("%d receive reply:%s from node %d", rf.me, toJsonString(reply), idx)
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.role = FOLLOWER
 					return
+				}
+				if reply.VoteGranted && rf.role == CANDIDATE {
+					atomic.AddInt32(&collectBallot, 1)
+					if int32(winBallot) <= atomic.LoadInt32(&collectBallot) {
+						log.Printf("%d become leader", rf.me)
+						rf.role = LEADER
+						dropAndSet(rf.heartbeatCh, kHearbeat)
+						return
+					}
 				}
 			}
 		}(idx)
@@ -454,41 +449,47 @@ func (rf *Raft) startElection()  {
 }
 
 func (rf *Raft) startAppendEntries()  {
-
-	mayNextIdx := len(rf.log) - 1
-	var wg sync.WaitGroup;
 	var replicaCount int32 = 0;
 	peerCount := len(rf.peers)
+	winBallot := peerCount / 2 + peerCount%2;
+	heartBeatArgs := make([]AppendEntriesArgs, 0)
+	rf.mu.Lock()
+	mayNextIdx := len(rf.log) - 1
+	for i := 0; i < peerCount; i++ {
+		logs := make([]LogEntry, 0)
+		if rf.nextIndex[i] < mayNextIdx + 1 {
+			logs = rf.log[rf.nextIndex[i]:mayNextIdx + 1]
+		}
+		prevLogIdx := rf.nextIndex[i] - 1
+		prevLogTerm := 0
+		if 0 <= prevLogIdx && prevLogIdx < len(rf.log) {
+			prevLogTerm = rf.log[prevLogIdx].Term
+		}
+		heartBeatArgs = append(heartBeatArgs, AppendEntriesArgs{rf.currentTerm, rf.me,prevLogIdx, prevLogTerm, logs, rf.commitIndex});
+	}
+	rf.mu.Unlock()
 	for i := 0; i < peerCount; i++ {
 		if i == rf.me {
 			continue
 		}
-		wg.Add(1)
 		go func(i int) {
-			defer wg.Done()
-			rf.mu.Lock()
-			logs := make([]LogEntry, 0)
-			if rf.nextIndex[i] < mayNextIdx + 1 {
-				logs = rf.log[rf.nextIndex[i]:mayNextIdx + 1]
-			}
-			prevLogIdx := rf.nextIndex[i] - 1
-			prevLogTerm := 0
-			if 0 <= prevLogIdx && prevLogIdx < len(rf.log) {
-				prevLogTerm = rf.log[prevLogIdx].Term
-			}
-			heartBeatArgs := AppendEntriesArgs{rf.currentTerm, rf.me,prevLogIdx, prevLogTerm, logs, rf.commitIndex}
-			rf.mu.Unlock()
 			reply := &AppendEntriesReply{}
-			ok := rf.sendAppendEntries(i, heartBeatArgs, reply)
+			ok := rf.sendAppendEntries(i, heartBeatArgs[i], reply)
 			if ok {
 				rf.mu.Lock()
 				if reply.Term > rf.currentTerm {
 					rf.becomeFollower(reply.Term)
+					dropAndSet(rf.heartbeatCh, kHearbeat);
 				}
 
 				if reply.Success {
 					atomic.AddInt32(&replicaCount, 1)
 					rf.nextIndex[i] = mayNextIdx + 1
+					if int32(winBallot) <= atomic.LoadInt32(&replicaCount) + 1 {
+						rf.commitIndex = max(rf.commitIndex, mayNextIdx)
+						rf.applyLogEntry()
+					}
+
 				} else {
 					if 0 < rf.nextIndex[i] {
 						rf.nextIndex[i]--
@@ -499,14 +500,6 @@ func (rf *Raft) startAppendEntries()  {
 			}
 		}(i)
 	}
-
-	wg.Wait()
-	rf.mu.Lock()
-	if int32(peerCount/2) <=replicaCount {
-		rf.commitIndex = mayNextIdx
-		rf.applyLogEntry()
-	}
-	rf.mu.Unlock()
 }
 
 func (rf *Raft) runAsLeader() bool {
@@ -515,6 +508,8 @@ func (rf *Raft) runAsLeader() bool {
 		return false
 	case <-time.After(rf.heartbeatTimeout):
 		rf.startAppendEntries()
+	case <-rf.heartbeatCh:
+
 	}
 	return true
 }
@@ -582,8 +577,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.currentTerm = 0
 	rf.votedFor = kVotedNone
-	rf.commitIndex = 0
-	rf.lastApplied = 0
+	rf.commitIndex = -1
+	rf.lastApplied = -1
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchedIndex = make([]int, len(peers))
 	rf.role = FOLLOWER
