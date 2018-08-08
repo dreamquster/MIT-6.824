@@ -2,7 +2,10 @@ package raftkv
 
 import "labrpc"
 import "crypto/rand"
-import "math/big"
+import (
+	"math/big"
+	"time"
+)
 
 
 type Clerk struct {
@@ -39,6 +42,19 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
+	getArgs := GetArgs{key}
+	leader := 0
+	for {
+		server := ck.servers[leader]
+		reply := &GetReply{}
+		server.Call("RaftKV.Get", &getArgs, &reply)
+		if !reply.WrongLeader {
+			return reply.Value
+		} else {
+			leader = reply.LeaderId
+		}
+		time.Sleep(1 *time.Second)
+	}
 	return ""
 }
 
@@ -54,6 +70,20 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	args := PutAppendArgs{key, value, op}
+
+	leader := 0
+	for {
+		server := ck.servers[leader]
+		reply := &PutAppendReply{}
+		server.Call("RaftKV.PutAppend", &args, &reply)
+		if !reply.WrongLeader {
+			return
+		} else {
+			leader = reply.LeaderId
+		}
+		time.Sleep(1 *time.Second)
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {

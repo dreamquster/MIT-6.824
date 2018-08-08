@@ -38,10 +38,27 @@ type RaftKV struct {
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	_, isLeader := kv.rf.GetState()
+	reply.WrongLeader = !isLeader
+	if isLeader {
+		value := kv.rf.ProcessGet(args.Key)
+		reply.Value = value
+	}
+	reply.LeaderId = kv.rf.GetLeaderId()
+	return
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	index, _, isLeader := kv.rf.Start(args)
+	reply.WrongLeader = !isLeader
+	reply.AppendId = index
+	return
 }
 
 //

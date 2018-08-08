@@ -28,6 +28,7 @@ import (
 	"sync/atomic"
 	"bytes"
 	"encoding/gob"
+	"strings"
 )
 
 // import "bytes"
@@ -63,10 +64,17 @@ const (
 	APPLIES
 )
 
+
 type LogEntry struct {
 	Term		int				// Term of this log
 	Command		interface{}		// applied command
 	State		ApplyState
+}
+
+type PutAppendCmd struct {
+	Key string
+	Value string
+	Op	OpCode
 }
 
 
@@ -96,6 +104,8 @@ type Raft struct {
 	heartbeatTimeout	time.Duration		// the last time received a heartbeat message
 	electionTimeout		time.Duration
 
+	stateMachine	map[string]string
+
 	applyCh			chan ApplyMsg
 	quitCh			chan int
 	heartbeatCh		chan int
@@ -114,6 +124,12 @@ func (rf *Raft) GetState() (int, bool) {
 	term = rf.currentTerm;
 	isleader = rf.role == LEADER
 	return term, isleader
+}
+
+func (rf *Raft) GetLeaderId() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.votedFor
 }
 
 //
@@ -235,6 +251,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 	if rf.role == CANDIDATE {
 		rf.becomeFollower(args.Term)
+		rf.votedFor = args.LeaderId
 	}
 
 
@@ -276,6 +293,12 @@ func (rf *Raft) getLastLogTerm() int {
 
 func (rf *Raft)  getLastLogIdx() int {
 	return len(rf.log) - 1;
+}
+
+func (rf *Raft) ProcessGet(key string) string {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.stateMachine[key]
 }
 
 //
@@ -398,8 +421,16 @@ func (rf *Raft) applyLogEntry()  {
 	//defer rf.mu.Unlock()
 	for i:= rf.lastApplied + 1;  i <= rf.commitIndex; i++  {
 		rf.log[i].State = APPLIES
-		rf.applyCh <- ApplyMsg{i + 1, rf.log[i].Command, false, make([]byte, 0)}
+		cmd := rf.log[i].Command
+		rf.applyCh <- ApplyMsg{i + 1, cmd, false, make([]byte, 0)}
 		log.Printf("%d send applyMsg %s at index %d", rf.me, toJsonString(rf.log[i]), i)
+		putAppendArg, ok := cmd.(PutAppendCmd)
+		if ok && strings.EqualFold("Put", putAppendArg.Op) {
+			rf.stateMachine[putAppendArg.Key] = putAppendArg.Value
+		} else if ok && strings.EqualFold("Append", putAppendArg.Op) {
+			rf.stateMachine[putAppendArg.Key] += putAppendArg.Value
+		}
+
 		rf.lastApplied = i;
 	}
 

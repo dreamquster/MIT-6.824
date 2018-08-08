@@ -20,6 +20,8 @@ type PutAppendArgs struct {
 type PutAppendReply struct {
 	WrongLeader bool
 	Err         Err
+	LeaderId	int
+	AppendId	int
 }
 
 type GetArgs struct {
@@ -31,4 +33,5 @@ type GetReply struct {
 	WrongLeader bool
 	Err         Err
 	Value       string
+	LeaderId	int
 }
