@@ -33,7 +33,18 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	clientsCommited	map[int64]int64
 }
+
+func (kv *RaftKV) GetLeader(args *GetLeaderArgs, reply *GetLeaderReply) {
+	term, isLeader := kv.rf.GetState()
+	reply.WrongLeader = !isLeader
+	reply.Term = term
+	reply.LeaderId = kv.me
+
+	return
+}
+
 
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
@@ -42,22 +53,40 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	defer kv.mu.Unlock()
 	_, isLeader := kv.rf.GetState()
 	reply.WrongLeader = !isLeader
+	reply.LeaderId = kv.rf.GetLeaderId()
+	if args.Key == "" {
+		return
+	}
+
 	if isLeader {
 		value := kv.rf.ProcessGet(args.Key)
 		reply.Value = value
 	}
-	reply.LeaderId = kv.rf.GetLeaderId()
+
 	return
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
+	defer func() {
+		kv.mu.Lock()
+		reply.AppendId = kv.clientsCommited[args.ClientId]
+		kv.mu.Unlock()
+	}()
 
-	index, _, isLeader := kv.rf.Start(args)
+	if (args.Op == "Put" || args.Op == "Append") &&
+			args.RequestId <= kv.clientsCommited[args.ClientId]{
+		reply.Err = OK
+		return
+	}
+
+	index, _, isLeader  := kv.rf.Start(args)
 	reply.WrongLeader = !isLeader
-	reply.AppendId = index
+	if reply.WrongLeader {
+		return
+	}
+
+	reply.AppendId = int64(index)
 	return
 }
 
@@ -97,6 +126,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.clientsCommited = make(map[int64]int64)
+
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.

@@ -5,12 +5,19 @@ import "crypto/rand"
 import (
 	"math/big"
 	"time"
+	"log"
 )
 
+const NO_LEADER int = -1;
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	leaderId	int
+	term        int
+	id			int64
+	latestSeq	int64
+	commitId	int64
 }
 
 func nrand() int64 {
@@ -24,7 +31,58 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.leaderId = NO_LEADER;
+	ck.id = nrand()
+	ck.CheckOneLeader()
 	return ck
+}
+
+func (ck *Clerk) GetLeader() {
+	getLeaderArgs := &GetLeaderArgs{0}
+	replys := make([]GetLeaderReply, len(ck.servers))
+	termLeaders := make(map[int][]int, 0)
+
+	for idx, server := range ck.servers {
+		ok := server.Call("RaftKV.GetLeader", getLeaderArgs, &replys[idx]);
+		if !ok {
+			continue
+		}
+
+		if !replys[idx].WrongLeader {
+			t := replys[idx].Term
+			termLeaders[t] = append(termLeaders[t], replys[idx].LeaderId)
+		}
+	}
+
+	lastTermHasLeader := -1
+	for t, leaderInTerm := range termLeaders {
+		if 1 < len(leaderInTerm) {
+			log.Fatalf("in term %d has %d leaders", t, len(leaderInTerm))
+			ck.leaderId = NO_LEADER
+			return
+		}
+
+		if lastTermHasLeader < t {
+			lastTermHasLeader = t
+		}
+	}
+
+	if -1 < lastTermHasLeader {
+		ck.leaderId = termLeaders[lastTermHasLeader][0]
+		ck.term = lastTermHasLeader
+		return
+	}
+	ck.leaderId = NO_LEADER
+	return
+}
+
+func (ck *Clerk) CheckOneLeader()  {
+	ck.GetLeader()
+	for ck.leaderId == NO_LEADER {
+		time.Sleep(50 * time.Millisecond)
+		ck.GetLeader()
+	}
+	log.Printf("find leader is %d", ck.leaderId)
 }
 
 //
@@ -42,20 +100,20 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	getArgs := GetArgs{key}
-	leader := 0
-	for {
-		server := ck.servers[leader]
-		reply := &GetReply{}
-		server.Call("RaftKV.Get", &getArgs, &reply)
-		if !reply.WrongLeader {
-			return reply.Value
-		} else {
-			leader = reply.LeaderId
-		}
-		time.Sleep(1 *time.Second)
+	getArgs := GetArgs{key, ck.id}
+
+	server := ck.servers[ck.leaderId]
+	reply := &GetReply{}
+	ok := server.Call("RaftKV.Get", &getArgs, &reply)
+	if ok && reply.Err == OK &&!reply.WrongLeader {
+		return reply.Value
 	}
-	return ""
+
+	if ok && reply.WrongLeader {
+		ck.CheckOneLeader()
+	}
+
+	return ck.Get(key)
 }
 
 //
@@ -70,19 +128,21 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	args := PutAppendArgs{key, value, op}
-
-	leader := 0
+	requestId := ck.latestSeq
+	ck.latestSeq++
+	args := PutAppendArgs{key, value, op, ck.id, requestId}
 	for {
-		server := ck.servers[leader]
+
+		server := ck.servers[ck.leaderId]
 		reply := &PutAppendReply{}
-		server.Call("RaftKV.PutAppend", &args, &reply)
-		if !reply.WrongLeader {
+		ok := server.Call("RaftKV.PutAppend", &args, &reply)
+		if ok && !reply.WrongLeader {
+			ck.commitId = requestId
 			return
-		} else {
-			leader = reply.LeaderId
 		}
-		time.Sleep(1 *time.Second)
+		if reply.WrongLeader {
+			ck.CheckOneLeader()
+		}
 	}
 }
 
