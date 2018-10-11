@@ -6,6 +6,7 @@ import (
 	"log"
 	"raft"
 	"sync"
+	"time"
 )
 
 const Debug = 0
@@ -22,6 +23,14 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	OpType	string
+	Args	interface{}
+}
+
+type Result struct {
+	opType	string
+	args	interface{}
+	reply	interface{}
 }
 
 type RaftKV struct {
@@ -33,7 +42,10 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	database	map[string]string
 	clientsCommited	map[int64]int64
+	messages	map[int]chan Result
+	persister	*raft.Persister
 }
 
 func (kv *RaftKV) GetLeader(args *GetLeaderArgs, reply *GetLeaderReply) {
@@ -49,44 +61,66 @@ func (kv *RaftKV) GetLeader(args *GetLeaderArgs, reply *GetLeaderReply) {
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	_, isLeader := kv.rf.GetState()
-	reply.WrongLeader = !isLeader
-	reply.LeaderId = kv.rf.GetLeaderId()
-	if args.Key == "" {
+	index, _, isLeader := kv.rf.Start(Op{ OpType: Get, Args: *args })
+	if !isLeader {
+		reply.WrongLeader = true
 		return
 	}
-
-	if isLeader {
-		value := kv.rf.ProcessGet(args.Key)
-		reply.Value = value
+	kv.mu.Lock()
+	if _, ok := kv.messages[index]; !ok {
+		kv.messages[index] = make(chan Result, 1)
 	}
+	chanMsg := kv.messages[index]
+	kv.mu.Unlock()
 
-	return
+	select {
+	case msg := <- chanMsg:
+		if recvArgs, ok := msg.args.(GetArgs); !ok {
+			reply.WrongLeader = true
+		} else {
+			if args.ClientId != recvArgs.ClientId || args.RequestId != recvArgs.RequestId {
+				reply.WrongLeader = true
+			} else {
+				*reply = msg.reply.(GetReply)
+				reply.WrongLeader = false
+			}
+		}
+	case <-time.After(time.Second * 1): // 超时服务端控制
+		reply.WrongLeader = true
+	}
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	defer func() {
-		kv.mu.Lock()
-		reply.AppendId = kv.clientsCommited[args.ClientId]
-		kv.mu.Unlock()
-	}()
-
-	if (args.Op == "Put" || args.Op == "Append") &&
-			args.RequestId <= kv.clientsCommited[args.ClientId]{
-		reply.Err = OK
+	index, _, isLeader := kv.rf.Start(Op{OpType:PutAppend, Args: *args})
+	if !isLeader {
+		reply.WrongLeader = true
 		return
 	}
 
-	index, _, isLeader  := kv.rf.Start(args)
-	reply.WrongLeader = !isLeader
-	if reply.WrongLeader {
-		return
+	kv.mu.Lock()
+	if _, ok := kv.messages[index]; !ok {
+		kv.messages[index] = make(chan Result, 1)
+	}
+	chanMsg := kv.messages[index]
+	kv.mu.Unlock()
+
+	select {
+	case msg := <- chanMsg:
+		if recvArgs, ok := msg.args.(PutAppendArgs); !ok {
+			reply.WrongLeader = true
+		} else {
+			if args.ClientId != recvArgs.ClientId || args.RequestId != recvArgs.RequestId {
+				reply.WrongLeader = true
+			} else {
+				*reply = msg.reply.(PutAppendReply)
+				reply.WrongLeader = false
+			}
+		}
+	case <-time.After(time.Second * 1): // 超时服务端控制
+		reply.WrongLeader = true
 	}
 
-	reply.AppendId = int64(index)
 	return
 }
 
@@ -126,7 +160,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.clientsCommited = make(map[int64]int64)
+	kv.database = make(map[string]string)
 
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 

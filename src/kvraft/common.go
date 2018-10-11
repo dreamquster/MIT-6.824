@@ -3,6 +3,10 @@ package raftkv
 const (
 	OK       = "OK"
 	ErrNoKey = "ErrNoKey"
+	Get		 = "Get"
+	Put		 = "Put"
+	Append	 = "Append"
+	PutAppend= "PutAppend"
 )
 
 type Err string
@@ -30,6 +34,7 @@ type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
 	ClientId	int64
+	RequestId	int64
 }
 
 type GetReply struct {
