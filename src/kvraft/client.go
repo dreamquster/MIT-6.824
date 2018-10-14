@@ -5,12 +5,21 @@ import "crypto/rand"
 import (
 	"math/big"
 	"time"
+	"log"
+	"sync"
 )
 
+const NO_LEADER int = -1;
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	mu        sync.Mutex
+	leaderId  int
+	term      int
+	id        int64
+	requestId int64
+	commitId  int64
 }
 
 func nrand() int64 {
@@ -24,7 +33,23 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.leaderId = 0;
+	ck.id = nrand()
+	ck.CheckOneLeader()
 	return ck
+}
+
+func (ck *Clerk) GetLeader() {
+
+}
+
+func (ck *Clerk) CheckOneLeader()  {
+	ck.GetLeader()
+	for ck.leaderId == NO_LEADER {
+		time.Sleep(50 * time.Millisecond)
+		ck.GetLeader()
+	}
+	log.Printf("find leader is %d", ck.leaderId)
 }
 
 //
@@ -42,20 +67,28 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	getArgs := GetArgs{key}
-	leader := 0
-	for {
-		server := ck.servers[leader]
-		reply := &GetReply{}
-		server.Call("RaftKV.Get", &getArgs, &reply)
-		if !reply.WrongLeader {
-			return reply.Value
-		} else {
-			leader = reply.LeaderId
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	getLeaderArgs := &GetLeaderArgs{0}
+	ck.requestId++
+	ret := ""
+	for i := ck.leaderId; true; i = (i + 1) % len(ck.servers) {
+		server := ck.servers[i]
+		reply := GetReply{}
+		if server.Call("RaftKV.GetLeader", getLeaderArgs, &reply) {
+			if !reply.WrongLeader {
+				ck.leaderId = i
+				if reply.Err == OK {
+					ret = reply.Value
+				} else {
+					ret = ""
+				}
+				break
+			}
 		}
-		time.Sleep(1 *time.Second)
 	}
-	return ""
+
+	return ret
 }
 
 //
@@ -70,19 +103,20 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	args := PutAppendArgs{key, value, op}
-
-	leader := 0
-	for {
-		server := ck.servers[leader]
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	requestId := ck.requestId
+	ck.requestId++
+	args := PutAppendArgs{key, value, op, ck.id, requestId}
+	for i := ck.leaderId; true; i = (i + 1) % len(ck.servers) {
+		server := ck.servers[i]
 		reply := &PutAppendReply{}
-		server.Call("RaftKV.PutAppend", &args, &reply)
-		if !reply.WrongLeader {
-			return
-		} else {
-			leader = reply.LeaderId
+		if server.Call("RaftKV.PutAppend", &args, &reply) {
+			if !reply.WrongLeader {
+				ck.leaderId = i
+				return
+			}
 		}
-		time.Sleep(1 *time.Second)
 	}
 }
 

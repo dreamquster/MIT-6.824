@@ -104,6 +104,8 @@ type Raft struct {
 	heartbeatTimeout	time.Duration		// the last time received a heartbeat message
 	electionTimeout		time.Duration
 
+	firstHeartbeat	bool
+
 	stateMachine	map[string]string
 
 	applyCh			chan ApplyMsg
@@ -342,6 +344,7 @@ func (rf *Raft) becomeFollower(term int) {
 	rf.role = FOLLOWER
 	rf.currentTerm = term
 	rf.votedFor = kVotedNone
+	rf.firstHeartbeat = false
 }
 
 //
@@ -492,6 +495,7 @@ func (rf *Raft) startElection()  {
 					if int32(winBallot) <= atomic.LoadInt32(&collectBallot) {
 						log.Printf("%d become leader", rf.me)
 						rf.role = LEADER
+						rf.firstHeartbeat = true
 						dropAndSet(rf.heartbeatCh, kHearbeat)
 						return
 					}
@@ -556,7 +560,15 @@ func (rf *Raft) startAppendEntries()  {
 	}
 }
 
-func (rf *Raft) runAsLeader() bool {
+func (rf *Raft) runAsLeader(firstHeartBeat bool) bool {
+	if firstHeartBeat {
+		rf.mu.Lock()
+		rf.firstHeartbeat = false
+		rf.mu.Unlock()
+		rf.startAppendEntries()
+		return true
+	}
+
 	select {
 	case <-rf.quitCh:
 		return false
@@ -596,9 +608,10 @@ func (rf *Raft) heartbeatBackgroud() {
 		isExited := true
 		rf.mu.Lock()
 		role := rf.role
+		firstHeartbeat := rf.firstHeartbeat
 		rf.mu.Unlock()
 		if role == LEADER {
-			isExited = rf.runAsLeader()
+			isExited = rf.runAsLeader(firstHeartbeat)
 		} else if role== FOLLOWER || role == CANDIDATE {
 			isExited = rf.runAsFollowerCandidate()
 		}
@@ -641,6 +654,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh;
 	rf.quitCh = make(chan int, 1)
 	rf.heartbeatCh = make(chan int, 1)
+	rf.firstHeartbeat = false
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
