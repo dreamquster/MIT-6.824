@@ -74,7 +74,7 @@ type LogEntry struct {
 type PutAppendCmd struct {
 	Key string
 	Value string
-	Op	OpCode
+	Op	string
 }
 
 
@@ -578,7 +578,7 @@ func (rf *Raft) runAsFollowerCandidate() bool{
 				rf.role = CANDIDATE
 			}
 			rf.mu.Unlock()
-			log.Printf("%d:start election", rf.me)
+			log.Printf("%d:start election with election timeout is %d", rf.me, rf.electionTimeout)
 			go rf.startElection()
 			rf.electionTimeout = time.Millisecond * time.Duration(random(kMinElectTime, kMaxElectTime))
 		case <- rf.heartbeatCh:
@@ -588,7 +588,6 @@ func (rf *Raft) runAsFollowerCandidate() bool{
 }
 
 func random(min, max int) int {
-	rand.Seed(time.Now().Unix())
 	return rand.Intn(max - min) + min
 }
 
@@ -637,6 +636,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchedIndex = make([]int, len(peers))
 	rf.role = FOLLOWER
 	rf.heartbeatTimeout = kLeaderHeartPeriod
+	rand.Seed(time.Now().UnixNano())
 	rf.electionTimeout = time.Millisecond * time.Duration(random(kMinElectTime, kMaxElectTime))
 	rf.applyCh = applyCh;
 	rf.quitCh = make(chan int, 1)
