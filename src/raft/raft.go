@@ -515,10 +515,10 @@ func (rf *Raft) startAppendEntries()  {
 	mayNextIdx := len(rf.log) - 1
 	for i := 0; i < peerCount; i++ {
 		logs := make([]LogEntry, 0)
-		if rf.nextIndex[i] < mayNextIdx + 1 {
-			logs = rf.log[rf.nextIndex[i]:mayNextIdx + 1]
+		if rf.matchedIndex[i] < mayNextIdx {
+			logs = rf.log[rf.matchedIndex[i] + 1:mayNextIdx + 1]
 		}
-		prevLogIdx := rf.nextIndex[i] - 1
+		prevLogIdx := rf.matchedIndex[i]
 		prevLogTerm := 0
 		if 0 <= prevLogIdx && prevLogIdx < len(rf.log) {
 			prevLogTerm = rf.log[prevLogIdx].Term
@@ -543,6 +543,7 @@ func (rf *Raft) startAppendEntries()  {
 				if reply.Success {
 					atomic.AddInt32(&replicaCount, 1)
 					rf.nextIndex[i] = mayNextIdx + 1
+					rf.matchedIndex[i] = mayNextIdx
 					if int32(winBallot) <= atomic.LoadInt32(&replicaCount) + 1 {
 						rf.commitIndex = max(rf.commitIndex, mayNextIdx)
 						rf.applyLogEntry()
@@ -551,6 +552,7 @@ func (rf *Raft) startAppendEntries()  {
 				} else {
 					if 0 < rf.nextIndex[i] {
 						rf.nextIndex[i]--
+						rf.matchedIndex[i]--
 					}
 				}
 				rf.mu.Unlock()
@@ -564,6 +566,9 @@ func (rf *Raft) runAsLeader(firstHeartBeat bool) bool {
 	if firstHeartBeat {
 		rf.mu.Lock()
 		rf.firstHeartbeat = false
+		for idx, _ := range rf.matchedIndex {
+			rf.matchedIndex[idx] = 0
+		}
 		rf.mu.Unlock()
 		rf.startAppendEntries()
 		return true
