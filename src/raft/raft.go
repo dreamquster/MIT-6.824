@@ -515,10 +515,10 @@ func (rf *Raft) startAppendEntries()  {
 	mayNextIdx := len(rf.log) - 1
 	for i := 0; i < peerCount; i++ {
 		logs := make([]LogEntry, 0)
-		if rf.matchedIndex[i] < mayNextIdx + 1 {
-			logs = rf.log[rf.matchedIndex[i]:mayNextIdx + 1]
+		if rf.matchedIndex[i] < mayNextIdx {
+			logs = rf.log[rf.matchedIndex[i] + 1:mayNextIdx + 1]
 		}
-		prevLogIdx := rf.nextIndex[i] - 1
+		prevLogIdx := rf.matchedIndex[i]
 		prevLogTerm := 0
 		if 0 <= prevLogIdx && prevLogIdx < len(rf.log) {
 			prevLogTerm = rf.log[prevLogIdx].Term
