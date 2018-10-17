@@ -43,7 +43,7 @@ type RaftKV struct {
 
 	// Your definitions here.
 	database	map[string]string
-	clientsCommited	map[int64]int64
+	clientsCommit	map[int64]int64
 	messages	map[int]chan Result
 	persister	*raft.Persister
 }
@@ -56,6 +56,8 @@ func (kv *RaftKV) GetLeader(args *GetLeaderArgs, reply *GetLeaderReply) {
 
 	return
 }
+
+
 
 
 
@@ -124,6 +126,33 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	return
 }
 
+func (kv *RaftKV) DoUpdate()  {
+	for true  {
+		applyMsg := <- kv.applyCh
+		if applyMsg.UseSnapshot {
+
+		} else  {
+			request := applyMsg.Command.(Op)
+
+			var result Result
+			var clientId int64
+			var requestId int64
+			if request.OpType == Get {
+				args := request.Args.(GetArgs)
+				clientId = args.ClientId
+				requestId = args.RequestId
+			} else  {
+				args := request.Args.(PutAppendArgs)
+				clientId = args.ClientId
+				requestId = args.RequestId
+			}
+
+			result.opType = request.OpType
+			result.reply = kv.Apply(request, kv.IsDuplicate(clientId, requestId))
+		}
+
+	}
+}
 //
 // the tester calls Kill() when a RaftKV instance won't
 // be needed again. you are not required to do anything
@@ -133,6 +162,21 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *RaftKV) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
+}
+func (kv *RaftKV) Apply(op Op, duplicate bool) interface{} {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	return nil
+}
+func (kv *RaftKV) IsDuplicate(clientId int64, requestId int64) bool {
+	if maxRequest, ok := kv.clientsCommit[clientId]; ok {
+		if maxRequest >= requestId {
+			return true
+		}
+	}
+	kv.clientsCommit[clientId] = requestId
+	return false
 }
 
 //
