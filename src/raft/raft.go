@@ -239,7 +239,7 @@ func max(x,y int) int  {
 
 //
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)  {
-	//log.Printf("%d received appendEntires %s", rf.me, toJsonString(args))
+	log.Printf("%d received appendEntires %s", rf.me, toJsonString(args))
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer dropAndSet(rf.heartbeatCh, kHearbeat)
@@ -567,7 +567,7 @@ func (rf *Raft) runAsLeader(firstHeartBeat bool) bool {
 		rf.mu.Lock()
 		rf.firstHeartbeat = false
 		for idx, _ := range rf.matchedIndex {
-			rf.matchedIndex[idx] = 0
+			rf.matchedIndex[idx] = -1
 		}
 		rf.mu.Unlock()
 		rf.startAppendEntries()
@@ -595,7 +595,6 @@ func (rf *Raft) runAsFollowerCandidate() bool{
 				rf.role = CANDIDATE
 			}
 			rf.mu.Unlock()
-			log.Printf("%d:start election with election timeout is %d", rf.me, rf.electionTimeout)
 			go rf.startElection()
 			rf.electionTimeout = time.Millisecond * time.Duration(random(kMinElectTime, kMaxElectTime))
 		case <- rf.heartbeatCh:
@@ -652,6 +651,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = -1
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchedIndex = make([]int, len(peers))
+	for idx, _ := range rf.matchedIndex {
+		rf.matchedIndex[idx] = -1
+	}
 	rf.role = FOLLOWER
 	rf.heartbeatTimeout = kLeaderHeartPeriod
 	rand.Seed(time.Now().UnixNano())
