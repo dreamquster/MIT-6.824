@@ -4,8 +4,6 @@ import "labrpc"
 import "crypto/rand"
 import (
 	"math/big"
-	"time"
-	"log"
 	"sync"
 )
 
@@ -35,21 +33,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	// You'll have to add code here.
 	ck.leaderId = 0;
 	ck.id = nrand()
-	ck.CheckOneLeader()
 	return ck
-}
-
-func (ck *Clerk) GetLeader() {
-
-}
-
-func (ck *Clerk) CheckOneLeader()  {
-	ck.GetLeader()
-	for ck.leaderId == NO_LEADER {
-		time.Sleep(50 * time.Millisecond)
-		ck.GetLeader()
-	}
-	log.Printf("find leader is %d", ck.leaderId)
 }
 
 //
