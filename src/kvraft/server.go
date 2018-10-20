@@ -7,6 +7,7 @@ import (
 	"raft"
 	"sync"
 	"time"
+	"bytes"
 )
 
 const Debug = 0
@@ -141,14 +142,18 @@ func (kv *RaftKV) DoUpdate()  {
 				args := request.Args.(GetArgs)
 				clientId = args.ClientId
 				requestId = args.RequestId
+				result.args = args
 			} else  {
 				args := request.Args.(PutAppendArgs)
 				clientId = args.ClientId
 				requestId = args.RequestId
+				result.args = args
 			}
 
 			result.opType = request.OpType
 			result.reply = kv.Apply(request, kv.IsDuplicate(clientId, requestId))
+			kv.SendResult(applyMsg.Index, result);
+			kv.CheckSnapshot(applyMsg.Index)
 		}
 
 	}
@@ -167,6 +172,31 @@ func (kv *RaftKV) Apply(op Op, duplicate bool) interface{} {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
+	switch op.Args.(type) {
+	case GetArgs:
+		var reply  GetReply
+		args := op.Args.(GetArgs)
+		if value, ok := kv.database[args.Key]; ok {
+			reply.Err = OK
+			reply.Value = value
+		} else {
+			reply.Err = ErrNoKey
+		}
+		return reply
+	case PutAppendArgs:
+		var reply PutAppendReply
+		args := op.Args.(PutAppendArgs)
+		if !duplicate {
+			if args.Op == Put {
+				kv.database[args.Key] = args.Value
+			} else {
+				kv.database[args.Key] += args.Value
+			}
+		}
+		reply.Err = OK
+		return  reply
+	}
+
 	return nil
 }
 func (kv *RaftKV) IsDuplicate(clientId int64, requestId int64) bool {
@@ -177,6 +207,30 @@ func (kv *RaftKV) IsDuplicate(clientId int64, requestId int64) bool {
 	}
 	kv.clientsCommit[clientId] = requestId
 	return false
+}
+func (kv *RaftKV) SendResult(msgIdx int, result Result) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if _, ok := kv.messages[msgIdx]; !ok {
+		kv.messages[msgIdx] = make(chan Result, 1)
+	} else {
+		// 防止阻塞，未读数据
+		select {
+		case <-kv.messages[msgIdx]:
+		default:
+		}
+	}
+	kv.messages[msgIdx] <- result
+}
+func (kv *RaftKV) CheckSnapshot(index int) {
+	if kv.maxraftstate != -1 && float64(kv.maxraftstate)*0.8 < float64(kv.rf.GetSavedStates()) {
+		w := new(bytes.Buffer)
+		enc := gob.NewEncoder(w)
+		enc.Encode(kv.database)
+		enc.Encode(kv.clientsCommit)
+		data := w.Bytes()
+		go kv.rf.StartSnapshot(data, index)
+	}
 }
 
 //
@@ -197,6 +251,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// Go's RPC library to marshall/unmarshall.
 	gob.Register(Op{})
 
+	gob.Register(PutAppendArgs{})
+	gob.Register(GetArgs{})
+	gob.Register(PutAppendReply{})
+	gob.Register(GetReply{})
+
 	kv := new(RaftKV)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
@@ -205,10 +264,12 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.database = make(map[string]string)
+    kv.clientsCommit = make(map[int64]int64)
+	kv.persister = persister
+	kv.messages = make(map[int]chan Result)
 
+	go kv.DoUpdate()
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
-	// You may need initialization code here.
 
 	return kv
 }

@@ -69,13 +69,13 @@ func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
 	ck.mu.Lock()
 	defer ck.mu.Unlock()
-	getLeaderArgs := &GetLeaderArgs{0}
+	getArgs := GetArgs{key, ck.id, ck.requestId}
 	ck.requestId++
 	ret := ""
 	for i := ck.leaderId; true; i = (i + 1) % len(ck.servers) {
 		server := ck.servers[i]
 		reply := GetReply{}
-		if server.Call("RaftKV.GetLeader", getLeaderArgs, &reply) {
+		if server.Call("RaftKV.Get", &getArgs, &reply) {
 			if !reply.WrongLeader {
 				ck.leaderId = i
 				if reply.Err == OK {

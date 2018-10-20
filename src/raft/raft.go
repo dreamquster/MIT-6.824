@@ -134,6 +134,10 @@ func (rf *Raft) GetLeaderId() int {
 	return rf.votedFor
 }
 
+func (rf *Raft) GetSavedStates() int {
+	return rf.persister.RaftStateSize()
+}
+
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -239,7 +243,7 @@ func max(x,y int) int  {
 
 //
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)  {
-	log.Printf("%d received appendEntires %s", rf.me, toJsonString(args))
+	//log.Printf("%d received appendEntires %s", rf.me, toJsonString(args))
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer dropAndSet(rf.heartbeatCh, kHearbeat)
@@ -618,6 +622,9 @@ func (rf *Raft) heartbeatBackgroud() {
 			return
 		}
 	}
+}
+func (raft *Raft) StartSnapshot(data []byte, index int) {
+
 }
 
 //
