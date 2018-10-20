@@ -268,15 +268,8 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 	reply.Success = true
 	maxReservedIdx := args.PrevLogIndex + 1 + len(args.Entries)
-	for idx, entry := range args.Entries {
-		writeIdx := args.PrevLogIndex + 1 + idx
-		if writeIdx < len(rf.log) {
-			rf.log[writeIdx] = entry
-		} else {
-			rf.log = append(rf.log, entry)
-		}
-	}
-	//rf.log = rf.log[:maxReservedIdx]
+	rf.log = append(rf.log[:args.PrevLogIndex + 1], args.Entries...)
+	//log.Printf("%d concatenate result:%s",rf.me, toJsonString(rf.log))
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, maxReservedIdx)
 	}
@@ -513,6 +506,7 @@ func (rf *Raft) startAppendEntries()  {
 	heartBeatArgs := make([]AppendEntriesArgs, 0)
 	rf.mu.Lock()
 	mayNextIdx := len(rf.log) - 1
+	//log.Printf("%d log entries:%s", rf.me, toJsonString(rf.log))
 	for i := 0; i < peerCount; i++ {
 		logs := make([]LogEntry, 0)
 		if rf.matchedIndex[i] < mayNextIdx {
