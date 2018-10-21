@@ -730,6 +730,7 @@ func (rf *Raft) doInstallSnapshot(serverId int, snapshot []byte) {
 	args := InstallSnapshotArgs{rf.currentTerm, rf.me, rf.log[0].Index,
 			rf.log[0].Term, snapshot}
 	rf.mu.Unlock()
+
 	var reply InstallSnapshotReply
 	if ok := rf.sendInstallSnapshot(serverId, args, &reply); ok {
 		rf.mu.Lock()
