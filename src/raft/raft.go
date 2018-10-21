@@ -558,64 +558,52 @@ func (rf *Raft) getBaseLogIdx() int  {
 }
 
 func (rf *Raft) startAppendEntries()  {
-	var replicaCount int32 = 0;
-	peerCount := len(rf.peers)
-	winBallot := peerCount / 2 + peerCount%2;
-
-	for i := 0; i < peerCount; i++ {
+	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			go rf.updateLeaderCommit()
-			continue
-		}
-		go func(i int) {
-			rf.mu.Lock()
-			logs := make([]LogEntry, 0)
-			nextIdx := rf.matchedIndex[i] + 1
-			baseLogIdx := rf.log[0].Index
-			if nextIdx <= baseLogIdx {
-				rf.mu.Unlock()
-				rf.doInstallSnapshot(i, rf.persister.snapshot)
-			} else  {
-				mayNextIdx := rf.log[len(rf.log) - 1].Index
-				if rf.matchedIndex[i] < mayNextIdx {
-					logs = rf.log[rf.matchedIndex[i] + 1:]
-				}
-				prevLogIdx := rf.matchedIndex[i]
-				prevLogTerm := rf.log[prevLogIdx - baseLogIdx].Term
-				heartBeatArgs := AppendEntriesArgs{rf.currentTerm, rf.me,
-					prevLogIdx, prevLogTerm, logs, rf.commitIndex};
-				rf.mu.Unlock()
-
-				reply := &AppendEntriesReply{}
-				ok := rf.sendAppendEntries(i, heartBeatArgs, reply)
-				if ok {
-					rf.mu.Lock()
-					if reply.Term > rf.currentTerm {
-						rf.becomeFollower(reply.Term)
-						dropAndSet(rf.heartbeatCh, kHearbeat);
-					}
-
-					if reply.Success {
-						// todo: stasitics at other goroutine
-						atomic.AddInt32(&replicaCount, 1)
-						rf.nextIndex[i] = mayNextIdx + 1
-						rf.matchedIndex[i] = mayNextIdx
-						if int32(winBallot) <= atomic.LoadInt32(&replicaCount) + 1 {
-							oldCommitIdx := rf.commitIndex
-							rf.commitIndex = max(rf.commitIndex, mayNextIdx)
-							rf.applyLogEntry(oldCommitIdx)
-						}
-
-					} else {
-						if 0 < rf.matchedIndex[i] {
-							rf.nextIndex[i]--
-							rf.matchedIndex[i]--
-						}
-					}
+		} else {
+			go func(i int) {
+				rf.mu.Lock()
+				logs := make([]LogEntry, 0)
+				nextIdx := rf.matchedIndex[i] + 1
+				baseLogIdx := rf.log[0].Index
+				if nextIdx <= baseLogIdx {
 					rf.mu.Unlock()
+					rf.doInstallSnapshot(i, rf.persister.snapshot)
+				} else  {
+					mayNextIdx := rf.log[len(rf.log) - 1].Index
+					if rf.matchedIndex[i] < mayNextIdx {
+						logs = rf.log[rf.matchedIndex[i] + 1:]
+					}
+					prevLogIdx := rf.matchedIndex[i]
+					prevLogTerm := rf.log[prevLogIdx - baseLogIdx].Term
+					heartBeatArgs := AppendEntriesArgs{rf.currentTerm, rf.me,
+						prevLogIdx, prevLogTerm, logs, rf.commitIndex};
+					rf.mu.Unlock()
+
+					reply := &AppendEntriesReply{}
+					ok := rf.sendAppendEntries(i, heartBeatArgs, reply)
+					if ok {
+						rf.mu.Lock()
+						if reply.Term > rf.currentTerm {
+							rf.becomeFollower(reply.Term)
+							dropAndSet(rf.heartbeatCh, kHearbeat);
+						}
+
+						if reply.Success {
+							rf.nextIndex[i] = mayNextIdx + 1
+							rf.matchedIndex[i] = mayNextIdx
+						} else {
+							if 0 < rf.matchedIndex[i] {
+								rf.nextIndex[i]--
+								rf.matchedIndex[i]--
+							}
+						}
+						rf.mu.Unlock()
+					}
 				}
-			}
-		}(i)
+			}(i)
+		}
 	}
 }
 
@@ -756,7 +744,32 @@ func (rf *Raft) doInstallSnapshot(serverId int, snapshot []byte) {
 	}
 }
 func (rf *Raft) updateLeaderCommit() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist()
 
+	oldCommitIdx := rf.commitIndex
+	newCommitIdx := oldCommitIdx
+	for i:=len(rf.log)-1; rf.log[i].Index > oldCommitIdx && rf.log[i].Term == rf.currentTerm; i-- {
+		commitServer := 1
+		for server := range rf.peers {
+			if server != rf.me && rf.matchedIndex[server] >= rf.log[i].Index {
+				commitServer++
+			}
+		}
+
+		if len(rf.peers) <= commitServer*2  {
+			newCommitIdx = i
+			break
+		}
+	}
+
+	if oldCommitIdx == newCommitIdx {
+		return
+	}
+
+	rf.commitIndex = newCommitIdx
+	rf.applyLogEntry(oldCommitIdx)
 }
 
 //
