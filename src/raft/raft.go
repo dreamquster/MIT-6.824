@@ -459,7 +459,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	newLogEntry := LogEntry{rf.currentTerm, command, NEW_INSERT,
 	rf.log[len(rf.log) - 1].Index + 1}
 	rf.log = append(rf.log, newLogEntry)
-	return rf.getLastLogIdx() + 1, rf.getLastLogTerm(), isLeader
+	return rf.getLastLogIdx(), rf.getLastLogTerm(), isLeader
 }
 
 func (rf *Raft) applyLogEntry(oldCommitIdx int)  {
@@ -468,7 +468,7 @@ func (rf *Raft) applyLogEntry(oldCommitIdx int)  {
 	for i:= oldCommitIdx + 1;  i <= rf.commitIndex; i++  {
 		rf.log[i].State = APPLIES
 		cmd := rf.log[i].Command
-		rf.applyCh <- ApplyMsg{i + 1, cmd, false, make([]byte, 0)}
+		rf.applyCh <- ApplyMsg{i, cmd, false, make([]byte, 0)}
 		log.Printf("%d send applyMsg %s at index %d", rf.me, toJsonString(rf.log[i]), i)
 		putAppendArg, ok := cmd.(PutAppendCmd)
 		if ok && strings.EqualFold("Put", putAppendArg.Op) {
@@ -558,9 +558,11 @@ func (rf *Raft) getBaseLogIdx() int  {
 }
 
 func (rf *Raft) startAppendEntries()  {
+	go rf.updateLeaderCommit()
+
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
-			go rf.updateLeaderCommit()
+
 		} else {
 			go func(i int) {
 				rf.mu.Lock()
