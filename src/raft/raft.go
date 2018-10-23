@@ -277,7 +277,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 	reply.Term = rf.currentTerm
 	baseLogIdx := rf.log[0].Index
-	if args.PrevLogIndex < baseLogIdx ||
+	if args.PrevLogIndex < baseLogIdx || ((args.PrevLogIndex - baseLogIdx) >= len(rf.log)) ||
 		(rf.log[args.PrevLogIndex - baseLogIdx].Term != args.PrevLogTerm) {
 			reply.Success = false
 			return
@@ -347,7 +347,7 @@ func (rf *Raft) ProcessGet(key string) string {
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	log.Printf("%d recieved vote request %s", rf.me, toJsonString(args))
+	 //log.Printf("%d recieved vote request %s", rf.me, toJsonString(args))
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer func() {
@@ -367,7 +367,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 
-		log.Printf("vote to %d", args.CandidateId)
+		log.Printf("%d vote to %d logs:%s", rf.me, args.CandidateId, toJsonString(rf.log[len(rf.log) - 1]))
 	}
 	reply.Term = rf.currentTerm
 	return
@@ -469,9 +469,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) applyLogEntry(oldCommitIdx int)  {
 	//rf.mu.Lock()
 	//defer rf.mu.Unlock()
+	baseLogIdx := rf.log[0].Index
 	for i:= oldCommitIdx + 1;  i <= rf.commitIndex; i++  {
-		rf.log[i].State = APPLIES
-		cmd := rf.log[i].Command
+		rf.log[i-baseLogIdx].State = APPLIES
+		cmd := rf.log[i - baseLogIdx].Command
 		rf.applyCh <- ApplyMsg{i, cmd, false, make([]byte, 0)}
 		log.Printf("%d send applyMsg %s at index %d", rf.me, toJsonString(rf.log[i]), i)
 		putAppendArg, ok := cmd.(PutAppendCmd)
@@ -562,34 +563,36 @@ func (rf *Raft) getBaseLogIdx() int  {
 }
 
 func (rf *Raft) startAppendEntries()  {
-	go rf.updateLeaderCommit()
-
+	rf.mu.Lock()
+	baseLogIdx := rf.log[0].Index
+	mayNextIdx := rf.log[len(rf.log)-1].Index
+	nextIdx := make([]int, len(rf.peers))
+	heartBeatArgs := make([]AppendEntriesArgs, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
-		if i == rf.me {
+		nextIdx[i] = rf.matchedIndex[i] + 1
+		if i != rf.me && nextIdx[i] > baseLogIdx {
+			logs := make([]LogEntry, 0)
+			if rf.matchedIndex[i] < mayNextIdx {
+				logs = rf.log[rf.matchedIndex[i]+1 - baseLogIdx:]
+			}
+			prevLogIdx := min(rf.matchedIndex[i], mayNextIdx)
+			//log.Printf("%d prevLogIdx position:%d", rf.me, prevLogIdx - baseLogIdx)
+			prevLogTerm := rf.log[prevLogIdx-baseLogIdx].Term
+			heartBeatArgs[i] = AppendEntriesArgs{rf.currentTerm, rf.me,
+				prevLogIdx, prevLogTerm, logs, rf.commitIndex};
+		}
+	}
+	rf.mu.Unlock()
 
-		} else {
-			go func(i int) {
-				rf.mu.Lock()
-				logs := make([]LogEntry, 0)
-				nextIdx := rf.matchedIndex[i] + 1
-				baseLogIdx := rf.log[0].Index
-				if nextIdx <= baseLogIdx {
-					rf.mu.Unlock()
-					rf.doInstallSnapshot(i, rf.persister.snapshot)
-				} else  {
-					mayNextIdx := rf.log[len(rf.log) - 1].Index
-					if rf.matchedIndex[i] < mayNextIdx {
-						logs = rf.log[rf.matchedIndex[i] + 1:]
-					}
-					prevLogIdx := min(rf.matchedIndex[i], mayNextIdx)
-					//log.Printf("%d prevLogIdx position:%d", rf.me, prevLogIdx - baseLogIdx)
-					prevLogTerm := rf.log[prevLogIdx - baseLogIdx].Term
-					heartBeatArgs := AppendEntriesArgs{rf.currentTerm, rf.me,
-						prevLogIdx, prevLogTerm, logs, rf.commitIndex};
-					rf.mu.Unlock()
-
+	go rf.updateLeaderCommit()
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			if nextIdx[i] <= baseLogIdx {
+				go rf.doInstallSnapshot(i, rf.persister.snapshot)
+			} else {
+				go func(i int) {
 					reply := &AppendEntriesReply{}
-					ok := rf.sendAppendEntries(i, heartBeatArgs, reply)
+					ok := rf.sendAppendEntries(i, heartBeatArgs[i], reply)
 					if ok {
 						rf.mu.Lock()
 						if reply.Term > rf.currentTerm {
@@ -608,8 +611,9 @@ func (rf *Raft) startAppendEntries()  {
 						}
 						rf.mu.Unlock()
 					}
-				}
-			}(i)
+				}(i)
+			}
+
 		}
 	}
 }
@@ -755,6 +759,9 @@ func (rf *Raft) updateLeaderCommit() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
+	if rf.role != LEADER {
+		return
+	}
 
 	oldCommitIdx := rf.commitIndex
 	newCommitIdx := oldCommitIdx
