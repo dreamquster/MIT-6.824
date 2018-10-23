@@ -350,7 +350,11 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	log.Printf("%d recieved vote request %s", rf.me, toJsonString(args))
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer dropAndSet(rf.heartbeatCh, kHearbeat)
+	defer func() {
+		if reply.VoteGranted {
+			dropAndSet(rf.heartbeatCh, kHearbeat)
+		}
+	}()
 	defer rf.persist()
 
 	if args.Term > rf.currentTerm {
@@ -577,7 +581,8 @@ func (rf *Raft) startAppendEntries()  {
 					if rf.matchedIndex[i] < mayNextIdx {
 						logs = rf.log[rf.matchedIndex[i] + 1:]
 					}
-					prevLogIdx := rf.matchedIndex[i]
+					prevLogIdx := min(rf.matchedIndex[i], mayNextIdx)
+					//log.Printf("%d prevLogIdx position:%d", rf.me, prevLogIdx - baseLogIdx)
 					prevLogTerm := rf.log[prevLogIdx - baseLogIdx].Term
 					heartBeatArgs := AppendEntriesArgs{rf.currentTerm, rf.me,
 						prevLogIdx, prevLogTerm, logs, rf.commitIndex};
