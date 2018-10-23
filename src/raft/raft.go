@@ -286,8 +286,9 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 	reply.Success = true
 	matchedLogIndex := args.PrevLogIndex - baseLogIdx
-	maxReservedIdx := matchedLogIndex + len(args.Entries)
+
 	rf.log = append(rf.log[ : matchedLogIndex + 1], args.Entries...)
+	maxReservedIdx := rf.getLastLogIdx()
 	//log.Printf("%d concatenate result:%s",rf.me, toJsonString(rf.log))
 	oldCommitIdx := rf.commitIndex
 	if args.LeaderCommit > rf.commitIndex {
@@ -474,7 +475,7 @@ func (rf *Raft) applyLogEntry(oldCommitIdx int)  {
 		rf.log[i-baseLogIdx].State = APPLIES
 		cmd := rf.log[i - baseLogIdx].Command
 		rf.applyCh <- ApplyMsg{i, cmd, false, make([]byte, 0)}
-		log.Printf("%d send applyMsg %s at index %d", rf.me, toJsonString(rf.log[i]), i)
+		log.Printf("%d send applyMsg %s at index %d", rf.me, toJsonString(rf.log[i - baseLogIdx]), i)
 		putAppendArg, ok := cmd.(PutAppendCmd)
 		if ok && strings.EqualFold("Put", putAppendArg.Op) {
 			rf.stateMachine[putAppendArg.Key] = putAppendArg.Value
@@ -774,7 +775,7 @@ func (rf *Raft) updateLeaderCommit() {
 		}
 
 		if len(rf.peers) <= commitServer*2  {
-			newCommitIdx = i
+			newCommitIdx = rf.log[i].Index
 			break
 		}
 	}
