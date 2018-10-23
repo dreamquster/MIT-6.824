@@ -131,7 +131,7 @@ func (kv *RaftKV) DoUpdate()  {
 	for true  {
 		applyMsg := <- kv.applyCh
 		if applyMsg.UseSnapshot {
-
+			kv.UseSnapshot(applyMsg.Snapshot)
 		} else  {
 			request := applyMsg.Command.(Op)
 
@@ -231,6 +231,21 @@ func (kv *RaftKV) CheckSnapshot(index int) {
 		data := w.Bytes()
 		go kv.rf.StartSnapshot(data, index)
 	}
+}
+func (kv *RaftKV) UseSnapshot(snapshot []byte)  {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	var lastIncludedIndex int
+	var lastIncludedTerm int
+	kv.database = make(map[string]string)
+
+	r := bytes.NewBuffer(snapshot)
+	dec := gob.NewDecoder(r)
+	dec.Decode(&lastIncludedIndex)
+	dec.Decode(&lastIncludedTerm)
+	dec.Decode(&kv.database)
+	dec.Decode(&kv.clientsCommit)
 }
 
 //
