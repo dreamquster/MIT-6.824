@@ -4,8 +4,16 @@ package shardmaster
 import "raft"
 import "labrpc"
 import "sync"
-import "encoding/gob"
+import (
+	"encoding/gob"
+	"time"
+)
 
+type Result struct {
+	opType string
+	args 	interface{}
+	reply	interface{}
+}
 
 type ShardMaster struct {
 	mu      sync.Mutex
@@ -16,16 +24,48 @@ type ShardMaster struct {
 	// Your data here.
 
 	configs []Config // indexed by config num
+	clientsCommit 	map[int64]int64
+	messages	map[int]chan Result
 }
 
 
 type Op struct {
 	// Your data here.
+	OpType	string
+	Args	interface{}
 }
 
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
+	index, _, isLeader := sm.rf.Start(Op{OpType:JOIN, Args: *args})
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+
+	sm.mu.Lock()
+	if _, ok := sm.messages[index]; !ok {
+		sm.messages[index] = make(chan Result, 1)
+	}
+	chanMsg := sm.messages[index]
+	sm.mu.Unlock()
+
+	select {
+	case msg := <-chanMsg:
+		if recvArgs, ok := msg.args.(JoinArgs); !ok {
+			reply.WrongLeader = true
+		} else {
+			if args.ClientId != recvArgs.ClientId || args.RequestId != recvArgs.RequestId {
+				reply.WrongLeader = true
+			} else {
+				*reply = msg.reply.(JoinReply)
+				reply.WrongLeader = false
+			}
+		}
+	case <-time.After(1 * time.Second):
+		break
+	}
 }
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
@@ -77,4 +117,15 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	// Your code here.
 
 	return sm
+}
+
+
+func (sm *ShardMaster) IsDuplicate(clientId int64, requestId int64) bool {
+	if maxRequest, ok := sm.clientsCommit[clientId]; ok {
+		if maxRequest >= requestId {
+			return true
+		}
+	}
+	sm.clientsCommit[clientId] = requestId
+	return false
 }
