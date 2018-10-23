@@ -289,7 +289,6 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 	rf.log = append(rf.log[ : matchedLogIndex + 1], args.Entries...)
 	maxReservedIdx := rf.getLastLogIdx()
-	//log.Printf("%d concatenate result:%s",rf.me, toJsonString(rf.log))
 	oldCommitIdx := rf.commitIndex
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, maxReservedIdx)
