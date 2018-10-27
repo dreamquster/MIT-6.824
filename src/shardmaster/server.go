@@ -51,6 +51,7 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	chanMsg := sm.messages[index]
 	sm.mu.Unlock()
 
+	reply.WrongLeader = true
 	select {
 	case msg := <-chanMsg:
 		if recvArgs, ok := msg.args.(JoinArgs); !ok {
@@ -83,6 +84,7 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	chanMsg := sm.messages[index]
 	sm.mu.Unlock()
 
+	reply.WrongLeader = true
 	select {
 	case msg := <-chanMsg:
 		if recvArgs, ok := msg.args.(LeaveArgs); !ok {
@@ -115,6 +117,7 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	chanMsg := sm.messages[index]
 	sm.mu.Unlock()
 
+	reply.WrongLeader = true
 	select {
 	case msg := <-chanMsg:
 		if recvArgs, ok := msg.args.(MoveArgs); !ok {
@@ -147,6 +150,7 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	chanMsg := sm.messages[index]
 	sm.mu.Unlock()
 
+	reply.WrongLeader = true
 	select {
 	case msg := <-chanMsg:
 		if recvArgs, ok := msg.args.(QueryArgs); !ok {
@@ -209,14 +213,97 @@ func (sm *ShardMaster) DoUpdate()  {
 				clientId = args.ClientId
 				requestId = args.RequestId
 			}
-			sm.Apply(request, sm.IsDuplicate(clientId, requestId))
+			result.reply = sm.Apply(request, sm.IsDuplicate(clientId, requestId))
+			sm.SendResult(applyMsg.Index, result)
+
 		}
 
 	}
 }
 
-func (sm *ShardMaster) Apply(op Op, duplicate bool) interface{}   {
+func (sm *ShardMaster) SendResult(msgIdx int, result Result) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if _, ok := sm.messages[msgIdx]; !ok {
+		sm.messages[msgIdx] = make(chan Result, 1)
+	} else {
+		// 防止阻塞，未读数据
+		select {
+		case <-sm.messages[msgIdx]:
+		default:
+		}
+	}
+	sm.messages[msgIdx] <- result
+}
 
+func (sm *ShardMaster) Apply(op Op, duplicate bool) interface{}   {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	switch op.Args.(type) {
+	case JoinArgs:
+		var reply JoinReply
+		reply.Err = OK
+		if !duplicate {
+			newConfig := sm.copyLastConfig()
+			args := op.Args.(JoinArgs)
+			unionMaps(newConfig.Groups, args.Servers)
+			sm.configs = append(sm.configs, newConfig)
+		}
+		return reply
+	case LeaveArgs:
+		var reply LeaveReply
+		reply.Err = OK
+		if !duplicate {
+			newConfig := sm.copyLastConfig()
+			args := op.Args.(LeaveArgs)
+			for gid := range args.GIDs {
+				delete(newConfig.Groups, gid)
+			}
+			sm.configs = append(sm.configs, newConfig)
+		}
+		return reply
+	case MoveArgs:
+		var reply MoveReply
+		reply.Err = OK
+		if !duplicate {
+			newConfig := sm.copyLastConfig()
+			args := op.Args.(MoveArgs)
+			newConfig.Shards[args.Shard] = args.GID
+			sm.configs = append(sm.configs, newConfig)
+		}
+		return reply
+	case QueryArgs:
+		var reply QueryReply
+		reply.Err = OK
+		args := op.Args.(QueryArgs)
+		if args.Num == -1 || len(sm.configs) < args.Num {
+			reply.Config = sm.configs[len(sm.configs) - 1]
+		} else {
+			reply.Config = sm.configs[args.Num]
+		}
+		return reply
+	}
+	return nil
+}
+
+func unionMaps(dst map[int][]string, src map[int][]string)  {
+	for key, value := range src {
+		newValue := make([]string, len(value))
+		copy(newValue, value)
+		dst[key] = newValue
+	}
+}
+
+func (sm *ShardMaster) copyLastConfig() Config {
+	var newConfig Config
+	lastConfig := sm.configs[len(sm.configs)-1]
+	newConfig.Num = lastConfig.Num + 1
+	copy(newConfig.Shards[:NShards], lastConfig.Shards[:NShards])
+	newConfig.Groups = make(map[int][]string)
+	unionMaps(newConfig.Groups, lastConfig.Groups)
+
+	return newConfig
 }
 
 //
@@ -231,13 +318,24 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 
 	sm.configs = make([]Config, 1)
 	sm.configs[0].Groups = map[int][]string{}
+	sm.configs[0].Num = 0
 
 	gob.Register(Op{})
+	gob.Register(JoinArgs{})
+	gob.Register(JoinReply{})
+	gob.Register(LeaveArgs{})
+	gob.Register(LeaveReply{})
+	gob.Register(MoveArgs{})
+	gob.Register(MoveReply{})
+	gob.Register(QueryArgs{})
+	gob.Register(QueryReply{})
 	sm.applyCh = make(chan raft.ApplyMsg)
+	sm.clientsCommit = make(map[int64]int64)
+	sm.messages = make(map[int]chan Result)
+	go sm.DoUpdate()
 	sm.rf = raft.Make(servers, me, persister, sm.applyCh)
 
 	// Your code here.
-
 	return sm
 }
 

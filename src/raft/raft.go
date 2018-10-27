@@ -28,7 +28,6 @@ import (
 	"sync/atomic"
 	"bytes"
 	"encoding/gob"
-	"strings"
 )
 
 // import "bytes"
