@@ -213,6 +213,7 @@ func (sm *ShardMaster) DoUpdate()  {
 				clientId = args.ClientId
 				requestId = args.RequestId
 			}
+			result.args = request.Args
 			result.reply = sm.Apply(request, sm.IsDuplicate(clientId, requestId))
 			sm.SendResult(applyMsg.Index, result)
 
