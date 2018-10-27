@@ -237,6 +237,55 @@ func (sm *ShardMaster) SendResult(msgIdx int, result Result) {
 	sm.messages[msgIdx] <- result
 }
 
+func (sm *ShardMaster) clearGidsInMetux(gids []int)  {
+	lastIdx := len(sm.configs) - 1
+	for _, gid := range gids {
+		for s, g := range sm.configs[lastIdx].Shards {
+			if gid == g {
+				sm.configs[lastIdx].Shards[s] = 0
+			}
+		}
+	}
+}
+
+func (sm *ShardMaster) rebalanceInMetux()  {
+	lastIdx := len(sm.configs) - 1
+	groupNum := len(sm.configs[lastIdx].Groups)
+	avgShards := NShards/groupNum
+	maxShards := avgShards + 1
+	reminder := NShards % groupNum
+	gcount := make(map[int]int)
+	for s, g := range sm.configs[lastIdx].Shards {
+		if (gcount[g] + 1) <= avgShards {
+			gcount[g] += 1
+		}  else if (gcount[g] + 1) == maxShards {
+			if 0 == reminder {
+				sm.configs[lastIdx].Shards[s] = 0
+			} else {
+				reminder--;
+				gcount[g] += 1
+			}
+		} else {
+			sm.configs[lastIdx].Shards[s] = 0
+		}
+	}
+
+	shardIdx := 0
+	for gid, _ := range sm.configs[lastIdx].Groups {
+		if _, ok := gcount[gid]; !ok || gcount[gid] < avgShards{
+			for ; shardIdx < NShards; shardIdx++ {
+				if sm.configs[lastIdx].Shards[shardIdx] == 0 {
+					sm.configs[lastIdx].Shards[shardIdx] = gid
+					gcount[gid]++
+					if avgShards <= gcount[gid] {
+						break
+					}
+				}
+			}
+		}
+	}
+}
+
 func (sm *ShardMaster) Apply(op Op, duplicate bool) interface{}   {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -250,6 +299,7 @@ func (sm *ShardMaster) Apply(op Op, duplicate bool) interface{}   {
 			args := op.Args.(JoinArgs)
 			unionMaps(newConfig.Groups, args.Servers)
 			sm.configs = append(sm.configs, newConfig)
+			sm.rebalanceInMetux()
 		}
 		return reply
 	case LeaveArgs:
@@ -258,10 +308,12 @@ func (sm *ShardMaster) Apply(op Op, duplicate bool) interface{}   {
 		if !duplicate {
 			newConfig := sm.copyLastConfig()
 			args := op.Args.(LeaveArgs)
-			for gid := range args.GIDs {
+			for _, gid := range args.GIDs {
 				delete(newConfig.Groups, gid)
 			}
 			sm.configs = append(sm.configs, newConfig)
+			sm.clearGidsInMetux(args.GIDs)
+			sm.rebalanceInMetux()
 		}
 		return reply
 	case MoveArgs:
