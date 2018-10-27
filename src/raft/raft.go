@@ -107,8 +107,6 @@ type Raft struct {
 
 	firstHeartbeat	bool
 
-	stateMachine	map[string]string
-
 	applyCh			chan ApplyMsg
 	quitCh			chan int
 	heartbeatCh		chan int
@@ -336,12 +334,6 @@ func (rf *Raft)  getLastLogIdx() int {
 	return rf.log[len(rf.log) - 1].Index;
 }
 
-func (rf *Raft) ProcessGet(key string) string {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	return rf.stateMachine[key]
-}
-
 //
 // example RequestVote RPC handler.
 //
@@ -474,13 +466,7 @@ func (rf *Raft) applyLogEntry(oldCommitIdx int)  {
 		rf.log[i-baseLogIdx].State = APPLIES
 		cmd := rf.log[i - baseLogIdx].Command
 		rf.applyCh <- ApplyMsg{i, cmd, false, make([]byte, 0)}
-		log.Printf("%d send applyMsg %s at index %d", rf.me, toJsonString(rf.log[i - baseLogIdx]), i)
-		putAppendArg, ok := cmd.(PutAppendCmd)
-		if ok && strings.EqualFold("Put", putAppendArg.Op) {
-			rf.stateMachine[putAppendArg.Key] = putAppendArg.Value
-		} else if ok && strings.EqualFold("Append", putAppendArg.Op) {
-			rf.stateMachine[putAppendArg.Key] += putAppendArg.Value
-		}
+		//log.Printf("%d send applyMsg %s at index %d", rf.me, toJsonString(rf.log[i - baseLogIdx]), i)
 
 		rf.lastApplied = i;
 	}
