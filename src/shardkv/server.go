@@ -5,7 +5,11 @@ package shardkv
 import "labrpc"
 import "raft"
 import "sync"
-import "encoding/gob"
+import (
+	"encoding/gob"
+	"shardmaster"
+	"time"
+)
 
 
 
@@ -13,6 +17,14 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	OpType string
+	Args interface{}
+}
+
+type Result struct {
+	opType	string
+	args	interface{}
+	reply	interface{}
 }
 
 type ShardKV struct {
@@ -26,15 +38,97 @@ type ShardKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	mck 			*shardmaster.Clerk
+	clientsCommit 	map[int64]int64
+	messages		map[int]chan Result
+	database		map[string]string
+	serveShards		[]int
 }
 
+func (kv *ShardKV) containsShard(shardId int) bool  {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	for _, v := range kv.serveShards {
+		if v == shardId {
+			return true
+		}
+	}
+	return false
+}
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	if !kv.containsShard(args.ShardId) {
+		reply.WrongLeader = false
+		return
+	}
+
+	index, _, isLeader := kv.rf.Start(Op{ OpType: Get, Args: *args })
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+	kv.mu.Lock()
+	if _, ok := kv.messages[index]; !ok {
+		kv.messages[index] = make(chan Result, 1)
+	}
+	chanMsg := kv.messages[index]
+	kv.mu.Unlock()
+
+	select {
+	case msg := <- chanMsg:
+		if recvArgs, ok := msg.args.(GetArgs); !ok {
+			reply.WrongLeader = true
+		} else {
+			if args.ClientId != recvArgs.ClientId || args.RequestId != recvArgs.RequestId {
+				reply.WrongLeader = true
+			} else {
+				*reply = msg.reply.(GetReply)
+				reply.WrongLeader = false
+			}
+		}
+	case <-time.After(time.Second * 1): // 超时服务端控制
+		reply.WrongLeader = true
+	}
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	if !kv.containsShard(args.ShardId) {
+		reply.WrongLeader = false
+		return
+	}
+
+	index, _, isLeader := kv.rf.Start(Op{OpType: PutAppend, Args: *args})
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+
+	kv.mu.Lock()
+	if _, ok := kv.messages[index]; !ok {
+		kv.messages[index] = make(chan Result, 1)
+	}
+	chanMsg := kv.messages[index]
+	kv.mu.Unlock()
+
+	select {
+	case msg := <- chanMsg:
+		if recvArgs, ok := msg.args.(PutAppendArgs); !ok {
+			reply.WrongLeader = true
+		} else {
+			if args.ClientId != recvArgs.ClientId || args.RequestId != recvArgs.RequestId {
+				reply.WrongLeader = true
+			} else {
+				*reply = msg.reply.(PutAppendReply)
+				reply.WrongLeader = false
+			}
+		}
+	case <-time.After(time.Second * 1): // 超时服务端控制
+		reply.WrongLeader = true
+	}
+
+	return
 }
 
 //
@@ -81,7 +175,10 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// call gob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	gob.Register(Op{})
-
+	gob.Register(GetArgs{})
+	gob.Register(GetReply{})
+	gob.Register(PutAppendArgs{})
+	gob.Register(PutAppendReply{})
 	kv := new(ShardKV)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
@@ -94,9 +191,97 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// Use something like this to talk to the shardmaster:
 	// kv.mck = shardmaster.MakeClerk(kv.masters)
 
+	kv.mck = shardmaster.MakeClerk(kv.masters)
 	kv.applyCh = make(chan raft.ApplyMsg)
+	go kv.DoUpdate()
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-
 	return kv
+}
+
+func (kv *ShardKV) DoUpdate()  {
+	for true  {
+		applyMsg := <- kv.applyCh
+		if applyMsg.UseSnapshot {
+
+		} else  {
+			request := applyMsg.Command.(Op)
+
+			var result Result
+			var clientId int64
+			var requestId int64
+			if request.OpType == Get {
+				args := request.Args.(GetArgs)
+				clientId = args.ClientId
+				requestId = args.RequestId
+				result.args = args
+			} else  {
+				args := request.Args.(PutAppendArgs)
+				clientId = args.ClientId
+				requestId = args.RequestId
+				result.args = args
+			}
+
+			result.opType = request.OpType
+			result.reply = kv.Apply(request, kv.IsDuplicate(clientId, requestId))
+			kv.SendResult(applyMsg.Index, result);
+
+		}
+
+	}
+}
+
+func (kv *ShardKV) Apply(op Op, duplicate bool) interface{} {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	switch op.Args.(type) {
+	case GetArgs:
+		var reply  GetReply
+		args := op.Args.(GetArgs)
+		if value, ok := kv.database[args.Key]; ok {
+			reply.Err = OK
+			reply.Value = value
+		} else {
+			reply.Err = ErrNoKey
+		}
+		return reply
+	case PutAppendArgs:
+		var reply PutAppendReply
+		args := op.Args.(PutAppendArgs)
+		if !duplicate {
+			if args.Op == Put {
+				kv.database[args.Key] = args.Value
+			} else {
+				kv.database[args.Key] += args.Value
+			}
+		}
+		reply.Err = OK
+		return  reply
+	}
+
+	return nil
+}
+func (kv *ShardKV) IsDuplicate(clientId int64, requestId int64) bool {
+	if maxRequest, ok := kv.clientsCommit[clientId]; ok {
+		if maxRequest >= requestId {
+			return true
+		}
+	}
+	kv.clientsCommit[clientId] = requestId
+	return false
+}
+func (kv *ShardKV) SendResult(msgIdx int, result Result) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if _, ok := kv.messages[msgIdx]; !ok {
+		kv.messages[msgIdx] = make(chan Result, 1)
+	} else {
+		// 防止阻塞，未读数据
+		select {
+		case <-kv.messages[msgIdx]:
+		default:
+		}
+	}
+	kv.messages[msgIdx] <- result
 }
