@@ -9,9 +9,19 @@ import (
 	"encoding/gob"
 	"shardmaster"
 	"time"
+	"fmt"
+	"encoding/json"
+	"log"
 )
 
-
+func toJsonString(v interface{}) string{
+	b, err := json.Marshal(v)
+	if err != nil {
+		fmt.Println(err)
+		return ""
+	}
+	return string(b)
+}
 
 type Op struct {
 	// Your definitions here.
@@ -42,24 +52,21 @@ type ShardKV struct {
 	clientsCommit 	map[int64]int64
 	messages		map[int]chan Result
 	database		map[string]string
-	serveShards		[]int
+	config			shardmaster.Config
+
 }
 
 func (kv *ShardKV) containsShard(shardId int) bool  {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	for _, v := range kv.serveShards {
-		if v == shardId {
-			return true
-		}
-	}
-	return false
+	return kv.config.Shards[shardId] == kv.gid
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	if !kv.containsShard(args.ShardId) {
-		reply.WrongLeader = false
+	if !kv.containsShard(key2shard(args.Key)) {
+		reply.WrongLeader = true
+		reply.Err = ErrWrongGroup
 		return
 	}
 
@@ -90,12 +97,14 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	case <-time.After(time.Second * 1): // 超时服务端控制
 		reply.WrongLeader = true
 	}
+	return
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	if !kv.containsShard(args.ShardId) {
-		reply.WrongLeader = false
+	if !kv.containsShard(key2shard(args.Key)) {
+		reply.WrongLeader = true
+		reply.Err = ErrWrongGroup
 		return
 	}
 
@@ -193,7 +202,11 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	kv.mck = shardmaster.MakeClerk(kv.masters)
 	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.messages = make(map[int]chan Result)
+	kv.database = make(map[string]string)
+	kv.clientsCommit = make(map[int64]int64)
 	go kv.DoUpdate()
+	go kv.DetectConfigChange()
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	return kv
@@ -284,4 +297,20 @@ func (kv *ShardKV) SendResult(msgIdx int, result Result) {
 		}
 	}
 	kv.messages[msgIdx] <- result
+}
+
+func (kv *ShardKV) DetectConfigChange()  {
+	ticker := time.NewTicker(time.Millisecond * 100)
+	for range ticker.C {
+		config := kv.mck.Query(-1)
+		kv.handleConfig(config)
+	}
+}
+func (kv *ShardKV) handleConfig(config shardmaster.Config) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if kv.config.Num != config.Num {
+		log.Printf("config changed %s", toJsonString(config))
+		kv.config = config
+	}
 }
