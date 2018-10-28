@@ -228,7 +228,7 @@ func (kv *ShardKV) DoUpdate()  {
 				clientId = args.ClientId
 				requestId = args.RequestId
 				result.args = args
-			} else  {
+			} else if request.OpType == PutAppend  {
 				args := request.Args.(PutAppendArgs)
 				clientId = args.ClientId
 				requestId = args.RequestId

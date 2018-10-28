@@ -71,12 +71,6 @@ type LogEntry struct {
 	Index		int 			// index at the whole log
 }
 
-type PutAppendCmd struct {
-	Key string
-	Value string
-	Op	string
-}
-
 
 //
 // A Go object implementing a single Raft peer.
