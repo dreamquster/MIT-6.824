@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"encoding/json"
 	"log"
+	"github.com/pingcap/tidb/kv"
 )
 
 func toJsonString(v interface{}) string{
@@ -48,11 +49,12 @@ type ShardKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	mck 			*shardmaster.Clerk
-	clientsCommit 	map[int64]int64
-	messages		map[int]chan Result
-	database		map[string]string
-	config			shardmaster.Config
+	mck           *shardmaster.Clerk
+	clientsCommit map[int64]int64
+	messages      map[int]chan Result
+	shardDatabase []map[string]string
+	config        shardmaster.Config
+	requestId     int64
 
 }
 
@@ -203,8 +205,12 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.mck = shardmaster.MakeClerk(kv.masters)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.messages = make(map[int]chan Result)
-	kv.database = make(map[string]string)
+	kv.shardDatabase = make([]map[string]string, shardmaster.NShards)
+	for i:=0; i < shardmaster.NShards; i++ {
+		kv.shardDatabase[i] = make(map[string]string)
+	}
 	kv.clientsCommit = make(map[int64]int64)
+	kv.requestId = 0
 	go kv.DoUpdate()
 	go kv.DetectConfigChange()
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
@@ -233,7 +239,13 @@ func (kv *ShardKV) DoUpdate()  {
 				clientId = args.ClientId
 				requestId = args.RequestId
 				result.args = args
+			} else if request.OpType == PullShard {
+				args := request.Args.(PullShardDataArgs)
+				clientId = args.ClientId
+				requestId = args.RequestId
+				result.args = args
 			}
+
 
 			result.opType = request.OpType
 			result.reply = kv.Apply(request, kv.IsDuplicate(clientId, requestId))
@@ -252,7 +264,8 @@ func (kv *ShardKV) Apply(op Op, duplicate bool) interface{} {
 	case GetArgs:
 		var reply  GetReply
 		args := op.Args.(GetArgs)
-		if value, ok := kv.database[args.Key]; ok {
+		sid := key2shard(args.Key)
+		if value, ok := kv.shardDatabase[sid][args.Key]; ok {
 			reply.Err = OK
 			reply.Value = value
 		} else {
@@ -262,19 +275,62 @@ func (kv *ShardKV) Apply(op Op, duplicate bool) interface{} {
 	case PutAppendArgs:
 		var reply PutAppendReply
 		args := op.Args.(PutAppendArgs)
+		sid := key2shard(args.Key)
 		if !duplicate {
 			if args.Op == Put {
-				kv.database[args.Key] = args.Value
+				kv.shardDatabase[sid][args.Key] = args.Value
 			} else {
-				kv.database[args.Key] += args.Value
+				kv.shardDatabase[sid][args.Key] += args.Value
 			}
 		}
 		reply.Err = OK
 		return  reply
+	case PullShardDataArgs:
+		return kv.applyPullShard(op)
+	case ReconfigArgs:
+		return kv.applyReconfig(op)
 	}
 
 	return nil
 }
+
+func (kv *ShardKV) applyPullShard(op Op) PullShardDataReply {
+	var reply PullShardDataReply
+	args := op.Args.(PullShardDataArgs)
+	if args.ConfigNum > kv.config.Num {
+		reply.WrongLeader = true
+		reply.Err = ErrWrongConfigNum
+		return reply
+	}
+
+	reply.Err = OK
+	reply.WrongLeader = false
+	for _, sid := range args.Shards {
+		unionMaps(reply.StoredShards[sid], kv.shardDatabase[sid])
+		for key, value := range kv.clientsCommit {
+			reply.ClientCommit[key] = value
+		}
+	}
+	return reply
+}
+
+func (kv *ShardKV) applyReconfig(op Op) interface{} {
+	var reply ReconfigReply
+	args := op.Args.(ReconfigArgs)
+	if kv.config.Num >= args.Config.Num {
+		reply.Err = ErrWrongConfigNum
+		return reply;
+	}
+
+	for sid, _ := range args.StoredShards {
+		unionMaps(kv.shardDatabase[sid], args.StoredShards[sid])
+	}
+	unionCommitMaps(kv.clientsCommit, args.ClientCommit)
+	kv.config = args.Config
+	reply.Err = OK
+	return reply
+}
+
 func (kv *ShardKV) IsDuplicate(clientId int64, requestId int64) bool {
 	if maxRequest, ok := kv.clientsCommit[clientId]; ok {
 		if maxRequest >= requestId {
@@ -302,15 +358,115 @@ func (kv *ShardKV) SendResult(msgIdx int, result Result) {
 func (kv *ShardKV) DetectConfigChange()  {
 	ticker := time.NewTicker(time.Millisecond * 100)
 	for range ticker.C {
-		config := kv.mck.Query(-1)
-		kv.handleConfig(config)
+		if _, isLeader := kv.rf.GetState(); isLeader {
+			config := kv.mck.Query(kv.config.Num + 1)
+			kv.handleConfig(config)
+		} else {
+			return
+		}
 	}
 }
-func (kv *ShardKV) handleConfig(config shardmaster.Config) {
+func (kv *ShardKV) handleConfig(newConfig shardmaster.Config) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	if kv.config.Num != config.Num {
-		log.Printf("config changed %s", toJsonString(config))
-		kv.config = config
+	if kv.config.Num < newConfig.Num {
+		log.Printf("config changed %s", toJsonString(newConfig))
+
+		pullShards := make(map[int][]int)
+		for idx := range newConfig.Shards {
+			if newConfig.Shards[idx] == kv.gid && kv.config.Shards[idx] != kv.gid {
+				pullShards[kv.config.Shards[idx]] = append(pullShards[kv.config.Shards[idx]], idx)
+			}
+		}
+
+
+		if 0 < len(pullShards) {
+			var reconfigArgs ReconfigArgs
+			var wg sync.WaitGroup
+			wg.Add(len(pullShards))
+			for gid, shards := range pullShards {
+				go func(gid int, shards []int) {
+					defer wg.Done()
+					kv.pullShardDataFromGid(newConfig, shards, gid, reconfigArgs)
+				}(gid, shards)
+			}
+
+			wg.Wait()
+			// 不成功下一轮重试
+			kv.rf.Start(Op{OpType:Reconfiguration, Args:reconfigArgs})
+		}
+
+	}
+}
+func (kv *ShardKV) pullShardDataFromGid(newConfig shardmaster.Config, shards []int, gid int, reconfigArgs ReconfigArgs) {
+	args := PullShardDataArgs{newConfig.Num, shards, nrand(), kv.requestId}
+	gservers := newConfig.Groups[gid]
+	var reply PullShardDataReply
+	kv.callPullShardDataArgs(gservers, args, &reply)
+	for _, sid := range shards {
+		unionMaps(reconfigArgs.StoredShards[sid], reply.StoredShards[sid])
+		unionCommitMaps(reconfigArgs.ClientCommit, reply.ClientCommit)
+	}
+}
+
+
+func (kv *ShardKV) PullShardData(args *PullShardDataArgs, reply *PullShardDataReply)  {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	index, _, isLeader := kv.rf.Start(Op{OpType: PullShard, Args: *args})
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+
+	kv.mu.Lock()
+	if _, ok := kv.messages[index]; !ok {
+		kv.messages[index] = make(chan Result, 1)
+	}
+	chanMsg := kv.messages[index]
+	kv.mu.Unlock()
+
+	select {
+	case msg := <- chanMsg:
+		if recvArgs, ok := msg.args.(PutAppendArgs); !ok {
+			reply.WrongLeader = true
+		} else {
+			if args.ClientId != recvArgs.ClientId || args.RequestId != recvArgs.RequestId {
+				reply.WrongLeader = true
+			} else {
+				*reply = msg.reply.(PullShardDataReply)
+				reply.WrongLeader = false
+			}
+		}
+	case <-time.After(time.Second * 1): // 超时服务端控制
+		reply.WrongLeader = true
+	}
+
+	return
+}
+
+func unionMaps(dst map[string]string, src map[string]string)  {
+	for key, value := range src {
+		if dst[key] < value {
+			dst[key] = value
+		}
+	}
+}
+
+func unionCommitMaps(dst map[int64]int64, src map[int64]int64)  {
+	for key, value := range src {
+		dst[key] = value
+	}
+}
+
+func (kv *ShardKV) callPullShardDataArgs(gservers []string, args PullShardDataArgs, reply *PullShardDataReply) {
+	for _, server := range gservers {
+		srv := kv.make_end(server)
+		ok := srv.Call("ShardKV.PullShardData", &args, &reply)
+		if ok && reply.WrongLeader == false && (reply.Err == OK ) {
+			// fetched data
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }

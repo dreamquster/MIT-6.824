@@ -15,6 +15,7 @@ const (
 	OK            = "OK"
 	ErrNoKey      = "ErrNoKey"
 	ErrWrongGroup = "ErrWrongGroup"
+	ErrWrongConfigNum = "ErrWrongConfigNum"
 )
 const (
 	Get       = "Get"
@@ -22,6 +23,7 @@ const (
 	Append    = "Append"
 	PutAppend = "PutAppend"
 	Reconfiguration = "Reconfiguration"
+	PullShard = "PullShard"
 )
 type Err string
 
@@ -59,6 +61,7 @@ type GetReply struct {
 type PullShardDataArgs struct {
 	ConfigNum	int
 	Shards		[]int
+
 	ClientId	int64
 	RequestId	int64
 }
@@ -67,11 +70,13 @@ type PullShardDataReply struct {
 	WrongLeader bool
 	Err         Err
 	StoredShards	[shardmaster.NShards]map[string]string
-
+	ClientCommit	map[int64]int64
 }
 
 type ReconfigArgs struct {
 	Config		shardmaster.Config
+	StoredShards	[shardmaster.NShards]map[string]string
+	ClientCommit	map[int64]int64
 }
 
 type ReconfigReply struct {
