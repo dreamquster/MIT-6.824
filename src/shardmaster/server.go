@@ -330,7 +330,7 @@ func (sm *ShardMaster) Apply(op Op, duplicate bool) interface{}   {
 		var reply QueryReply
 		reply.Err = OK
 		args := op.Args.(QueryArgs)
-		if args.Num == -1 || len(sm.configs) < args.Num {
+		if args.Num == -1 || len(sm.configs) <= args.Num {
 			reply.Config = sm.configs[len(sm.configs) - 1]
 		} else {
 			reply.Config = sm.configs[args.Num]

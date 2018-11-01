@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"encoding/json"
 	"log"
-	"github.com/pingcap/tidb/kv"
 )
 
 func toJsonString(v interface{}) string{
@@ -190,12 +189,19 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	gob.Register(GetReply{})
 	gob.Register(PutAppendArgs{})
 	gob.Register(PutAppendReply{})
+	gob.Register(PullShardDataArgs{})
+	gob.Register(PullShardDataReply{})
+	gob.Register(ReconfigArgs{})
+	gob.Register(ReconfigReply{})
 	kv := new(ShardKV)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 	kv.make_end = make_end
 	kv.gid = gid
 	kv.masters = masters
+	kv.config = shardmaster.Config{Num:0}
+	kv.config.Groups = map[int][]string{}
+
 
 	// Your initialization code here.
 
@@ -323,10 +329,13 @@ func (kv *ShardKV) applyReconfig(op Op) interface{} {
 	}
 
 	for sid, _ := range args.StoredShards {
+		kv.shardDatabase[sid] = make(map[string]string)
+
 		unionMaps(kv.shardDatabase[sid], args.StoredShards[sid])
 	}
 	unionCommitMaps(kv.clientsCommit, args.ClientCommit)
 	kv.config = args.Config
+	log.Printf("%d update to config %d", kv.gid, toJsonString(kv.config))
 	reply.Err = OK
 	return reply
 }
@@ -362,15 +371,14 @@ func (kv *ShardKV) DetectConfigChange()  {
 			config := kv.mck.Query(kv.config.Num + 1)
 			kv.handleConfig(config)
 		} else {
-			return
+			// do nothing
+			time.Sleep(time.Second * 1)
 		}
 	}
 }
 func (kv *ShardKV) handleConfig(newConfig shardmaster.Config) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
+
 	if kv.config.Num < newConfig.Num {
-		log.Printf("config changed %s", toJsonString(newConfig))
 
 		pullShards := make(map[int][]int)
 		for idx := range newConfig.Shards {
@@ -393,6 +401,7 @@ func (kv *ShardKV) handleConfig(newConfig shardmaster.Config) {
 
 			wg.Wait()
 			// 不成功下一轮重试
+			reconfigArgs.Config = newConfig
 			kv.rf.Start(Op{OpType:Reconfiguration, Args:reconfigArgs})
 		}
 
