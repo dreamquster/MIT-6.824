@@ -394,6 +394,7 @@ func (kv *ShardKV) applyPullShardData(op Op) interface{} {
 		unionCommits(reply.ClientsCommit, kv.clientsCommit)
 	}
 	reply.Err = OK
+	kv.clientsCommit[args.ClientId] = args.RequestId
 	return reply
 }
 
@@ -438,7 +439,6 @@ func (kv *ShardKV) IsDuplicate(clientId int64, requestId int64) bool {
 			return true
 		}
 	}
-	kv.clientsCommit[clientId] = requestId
 	return false
 }
 func (kv *ShardKV) SendResult(msgIdx int, result Result) {
@@ -556,6 +556,7 @@ func (kv *ShardKV) applyPutAppend(op Op, duplicate bool) interface{} {
 		log.Printf("group %d %d set key:%s to value:%s",kv.gid, kv.id, args.Key, kv.shardDatabase[sid][args.Key])
 	}
 	reply.Err = OK
+	kv.clientsCommit[args.ClientId] = args.RequestId
 	return  reply
 }
 func (kv *ShardKV) applyGet(op Op) interface{} {
@@ -573,6 +574,7 @@ func (kv *ShardKV) applyGet(op Op) interface{} {
 	} else {
 		reply.Err = ErrNoKey
 	}
+	kv.clientsCommit[args.ClientId] = args.RequestId
 	//log.Printf("%d reply Get query key:%s", kv.id, args.Key)
 	return reply
 }
