@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"encoding/json"
 	"log"
+	"bytes"
 )
 
 func toJsonString(v interface{}) string{
@@ -291,7 +292,7 @@ func (kv *ShardKV) DoUpdate()  {
 	for true  {
 		applyMsg := <- kv.applyCh
 		if applyMsg.UseSnapshot {
-
+			kv.UseSnapshot(applyMsg.Snapshot)
 		} else  {
 			request := applyMsg.Command.(Op)
 
@@ -318,7 +319,7 @@ func (kv *ShardKV) DoUpdate()  {
 			result.opType = request.OpType
 			result.reply = kv.Apply(request, kv.IsDuplicate(clientId, requestId))
 			kv.SendResult(applyMsg.Index, result);
-
+			kv.CheckSnapshot(applyMsg.Index)
 		}
 
 	}
@@ -362,6 +363,37 @@ func (kv *ShardKV) Apply(op Op, duplicate bool) interface{} {
 	}
 
 	return nil
+}
+
+func (kv *ShardKV) CheckSnapshot(index int) {
+	if kv.maxraftstate != -1 && float64(kv.maxraftstate)*0.8 < float64(kv.rf.GetSavedStates()) {
+		w := new(bytes.Buffer)
+		enc := gob.NewEncoder(w)
+		enc.Encode(kv.shardDatabase)
+		enc.Encode(kv.clientsCommit)
+		enc.Encode(kv.config)
+		data := w.Bytes()
+		go kv.rf.StartSnapshot(data, index)
+	}
+}
+
+func (kv *ShardKV) UseSnapshot(snapshot []byte)  {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	var lastIncludedIndex int
+	var lastIncludedTerm int
+	for i := 0; i < shardmaster.NShards; i ++ {
+		kv.shardDatabase[i] = make(map[string]string)
+	}
+
+	r := bytes.NewBuffer(snapshot)
+	dec := gob.NewDecoder(r)
+	dec.Decode(&lastIncludedIndex)
+	dec.Decode(&lastIncludedTerm)
+	dec.Decode(&kv.shardDatabase)
+	dec.Decode(&kv.clientsCommit)
+	dec.Decode(&kv.config)
 }
 
 
