@@ -66,9 +66,9 @@ func (kv *ShardKV) containsShard(shardId int) bool  {
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
-	defer func() {
-		log.Printf("%d reply Get query key:%s with reply:%s", kv.id, args.Key, toJsonString(reply))
-	}()
+	//defer func() {
+	//	log.Printf("%d reply Get query key:%s with reply:%s", kv.id, args.Key, toJsonString(reply))
+	//}()
 	// Your code here.
 	if !kv.containsShard(key2shard(args.Key)) {
 		reply.WrongLeader = true
@@ -331,31 +331,9 @@ func (kv *ShardKV) Apply(op Op, duplicate bool) interface{} {
 
 	switch op.Args.(type) {
 	case GetArgs:
-		var reply  GetReply
-		args := op.Args.(GetArgs)
-		sid := key2shard(args.Key)
-		if value, ok := kv.shardDatabase[sid][args.Key]; ok {
-			reply.Err = OK
-			reply.Value = value
-		} else {
-			reply.Err = ErrNoKey
-		}
-		log.Printf("%d reply Get query key:%s", kv.id, args.Key)
-		return reply
+		return kv.applyGet(op)
 	case PutAppendArgs:
-		var reply PutAppendReply
-		args := op.Args.(PutAppendArgs)
-		sid := key2shard(args.Key)
-		if !duplicate {
-			if args.Op == Put {
-				kv.shardDatabase[sid][args.Key] = args.Value
-			} else {
-				kv.shardDatabase[sid][args.Key] += args.Value
-			}
-			log.Printf("%d set key:%s to value:%s", kv.id, args.Key, kv.shardDatabase[sid][args.Key])
-		}
-		reply.Err = OK
-		return  reply
+		return kv.applyPutAppend(op, duplicate)
 	case PullShardDataArgs:
 		return kv.applyPullShardData(op)
 	case ReconfigArgs:
@@ -428,6 +406,9 @@ func (kv *ShardKV) applyReconfig(op Op) interface{} {
 	}
 
 	for sid, database := range args.StoredShards {
+		if 0 < len(kv.shardDatabase[sid]) && 0 < len(database) {
+			kv.shardDatabase[sid] = make(map[string]string)
+		}
 		unionMap(kv.shardDatabase[sid], database)
 	}
 	unionCommits(kv.clientsCommit, args.ClientsCommit)
@@ -556,5 +537,43 @@ func (kv *ShardKV) callPullShardData(newConfigNum int, gid int, shards []int) (b
 		}
 	}
 	return false, PullShardDataReply{}
+}
+func (kv *ShardKV) applyPutAppend(op Op, duplicate bool) interface{} {
+	var reply PutAppendReply
+	args := op.Args.(PutAppendArgs)
+	sid := key2shard(args.Key)
+	if kv.config.Shards[sid] != kv.gid  {
+		reply.Err = ErrWrongGroup
+		return reply
+	}
+
+	if !duplicate {
+		if args.Op == Put {
+			kv.shardDatabase[sid][args.Key] = args.Value
+		} else {
+			kv.shardDatabase[sid][args.Key] += args.Value
+		}
+		log.Printf("group %d %d set key:%s to value:%s",kv.gid, kv.id, args.Key, kv.shardDatabase[sid][args.Key])
+	}
+	reply.Err = OK
+	return  reply
+}
+func (kv *ShardKV) applyGet(op Op) interface{} {
+	var reply  GetReply
+	args := op.Args.(GetArgs)
+	sid := key2shard(args.Key)
+	if kv.config.Shards[sid] != kv.gid {
+		reply.Err = ErrWrongGroup
+		return reply
+	}
+
+	if value, ok := kv.shardDatabase[sid][args.Key]; ok {
+		reply.Err = OK
+		reply.Value = value
+	} else {
+		reply.Err = ErrNoKey
+	}
+	//log.Printf("%d reply Get query key:%s", kv.id, args.Key)
+	return reply
 }
 
