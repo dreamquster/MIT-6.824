@@ -285,6 +285,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	gob.Register(PullShardDataReply{})
 	gob.Register(ReconfigArgs{})
 	gob.Register(ReconfigReply{})
+	gob.Register(DeleteShardsArgs{})
+	gob.Register(DeleteShardsReply{})
+
 	kv := new(ShardKV)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
