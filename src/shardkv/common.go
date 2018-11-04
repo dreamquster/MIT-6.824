@@ -24,6 +24,7 @@ const (
 	PutAppend       = "PutAppend"
 	Reconfiguration = "Reconfiguration"
 	PullShardData   = "PullShardData"
+	DeleteShards   = "DeleteShards"
 )
 type Err string
 
@@ -81,4 +82,16 @@ type ReconfigArgs struct {
 type ReconfigReply struct {
 	WrongLeader bool
 	Err			Err
+}
+
+type DeleteShardsArgs struct {
+	ConfigNum	int
+	DelShards []int
+	ClientId	int64
+	RequestId	int64
+}
+
+type DeleteShardsReply struct {
+	WrongLeader bool
+	Err         Err
 }

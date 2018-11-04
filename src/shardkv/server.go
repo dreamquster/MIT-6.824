@@ -178,6 +178,32 @@ func (kv *ShardKV) PullShardData(args *PullShardDataArgs, reply *PullShardDataRe
 	return
 }
 
+func (kv *ShardKV) DeleteShards(args * DeleteShardsArgs, reply *DeleteShardsReply)  {
+	index, _, isLeader := kv.rf.Start(Op{ OpType: DeleteShards, Args: *args })
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+	kv.mu.Lock()
+	if _, ok := kv.messages[index]; !ok {
+		kv.messages[index] = make(chan Result, 1)
+	}
+	chanMsg := kv.messages[index]
+	kv.mu.Unlock()
+
+	select {
+	case msg := <- chanMsg:
+		if _, ok := msg.args.(DeleteShardsArgs); !ok {
+			reply.WrongLeader = true
+		} else {
+			*reply = msg.reply.(DeleteShardsReply)
+			reply.WrongLeader = false
+		}
+	case <-time.After(time.Second * 1): // 超时服务端控制
+		reply.WrongLeader = true
+	}
+	return
+}
 
 func (kv *ShardKV) Reconfig(args *ReconfigArgs, reply *ReconfigReply) {
 	// Your code here.
@@ -195,7 +221,7 @@ func (kv *ShardKV) Reconfig(args *ReconfigArgs, reply *ReconfigReply) {
 
 	select {
 	case msg := <- chanMsg:
-		if _, ok := msg.args.(Result); !ok {
+		if _, ok := msg.args.(ReconfigArgs); !ok {
 			reply.WrongLeader = true
 		} else {
 			*reply = msg.reply.(ReconfigReply)
@@ -299,6 +325,7 @@ func (kv *ShardKV) DoUpdate()  {
 			var result Result
 			var clientId int64
 			var requestId int64
+			result.args = request.Args
 			if request.OpType == Get {
 				args := request.Args.(GetArgs)
 				clientId = args.ClientId
@@ -338,6 +365,8 @@ func (kv *ShardKV) Apply(op Op, duplicate bool) interface{} {
 		return kv.applyPullShardData(op)
 	case ReconfigArgs:
 		return kv.applyReconfig(op)
+	case DeleteShardsArgs:
+		return kv.applyDeleteShards(op, duplicate)
 	}
 
 	return nil
@@ -504,8 +533,21 @@ func (kv *ShardKV) handleConfig(newConfig shardmaster.Config) {
 
 		wg.Wait()
 		if allPull {
+			oldConfig := kv.config
 			var reply ReconfigReply
 			kv.Reconfig(&reconfigArgs, &reply)
+			if OK == reply.Err {
+				for gid, shards := range gshards {
+					go func(gid int, shards []int) {
+						args := DeleteShardsArgs{kv.config.Num, shards, kv.id, kv.requestId}
+						kv.requestId++
+						ok, reply := kv.callDeleteShards(oldConfig, &args, gid)
+						log.Printf("%d received ok:%s, %s", kv.id, ok,  toJsonString(reply))
+					}(gid, shards)
+
+				}
+
+			}
 		}
 	}
 }
@@ -516,6 +558,7 @@ func initialShards(shardDb *[shardmaster.NShards]map[string]string) {
 }
 func (kv *ShardKV) callPullShardData(newConfigNum int, gid int, shards []int) (bool, PullShardDataReply) {
 	args := PullShardDataArgs{newConfigNum, shards, kv.id, kv.requestId}
+	kv.requestId++
 	for i := 0; i < 3; i++ {
 		if servers, ok := kv.config.Groups[gid]; ok {
 			// try each server for the shard.
@@ -538,6 +581,24 @@ func (kv *ShardKV) callPullShardData(newConfigNum int, gid int, shards []int) (b
 	}
 	return false, PullShardDataReply{}
 }
+
+func (kv *ShardKV) callDeleteShards(oldConfig shardmaster.Config, args *DeleteShardsArgs, gid int) (bool, interface{}) {
+	for i := 0; i < 3; i++ {
+		if servers, ok := oldConfig.Groups[gid]; ok {
+			// try each server for the shard.
+			for si := 0; si < len(servers); si++ {
+				srv := kv.make_end(servers[si])
+				var reply DeleteShardsReply
+				ok := srv.Call("ShardKV.DeleteShards", args, &reply)
+				if ok && reply.WrongLeader == false && (reply.Err == OK) {
+					return true, reply
+				}
+			}
+		}
+	}
+	return false, DeleteShardsReply{}
+}
+
 func (kv *ShardKV) applyPutAppend(op Op, duplicate bool) interface{} {
 	var reply PutAppendReply
 	args := op.Args.(PutAppendArgs)
@@ -578,4 +639,25 @@ func (kv *ShardKV) applyGet(op Op) interface{} {
 	//log.Printf("%d reply Get query key:%s", kv.id, args.Key)
 	return reply
 }
+
+func (kv *ShardKV) applyDeleteShards(op Op, duplicate bool) interface{} {
+	var reply DeleteShardsReply
+	args := op.Args.(DeleteShardsArgs)
+	if kv.config.Num < args.ConfigNum {
+		reply.Err = ErrConfigNum
+		return reply
+	}
+
+	if !duplicate {
+		for _, sid := range args.DelShards {
+			if kv.config.Shards[sid] != kv.gid {
+				kv.shardDatabase[sid] = make(map[string]string)
+			}
+		}
+	}
+	reply.Err = OK
+	kv.clientsCommit[args.ClientId] = args.RequestId
+	return reply
+}
+
 
