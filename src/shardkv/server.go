@@ -508,14 +508,14 @@ func (kv *ShardKV) DetectConfigChange()  {
 func (kv *ShardKV) handleConfig(newConfig shardmaster.Config) {
 	if kv.config.Num < newConfig.Num {
 		gshards := make(map[int][]int);
-		kv.mu.Lock()
+		//kv.mu.Lock()
 		for sid, gid := range newConfig.Shards {
 			kvsgid := kv.config.Shards[sid]
 			if 0 < kvsgid && kv.gid == gid &&  kvsgid != gid {
 				gshards[kvsgid] = append(gshards[kvsgid], sid)
 			}
 		}
-		kv.mu.Unlock()
+		//kv.mu.Unlock()
 
 		var wg sync.WaitGroup
 		allPull := true
@@ -600,6 +600,7 @@ func (kv *ShardKV) callPullShardData(newConfigNum int, gid int, shards []int) (b
 				}
 
 			}
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
 	return false, PullShardDataReply{}
