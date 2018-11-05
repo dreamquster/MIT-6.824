@@ -524,7 +524,8 @@ func (kv *ShardKV) handleConfig(newConfig shardmaster.Config) {
 			go func(gid int, shards []int) {
 				defer wg.Done()
 				ok, reply := kv.callPullShardData(newConfig.Num, gid, shards)
-				log.Printf("%d received ok:%s, %s", kv.id, ok,  toJsonString(reply))
+				//log.Printf("group:%d-id:%d %d received from gid:%d ok:%t, %s",
+				//	kv.gid, kv.me, kv.id, gid, ok, toJsonString(reply))
 				if ok {
 					var partialReply ReconfigReply
 					partialArgs := ReconfigArgs{newConfig, reply.StoredShards,
@@ -533,7 +534,7 @@ func (kv *ShardKV) handleConfig(newConfig shardmaster.Config) {
 					if OK == reply.Err {
 						args := DeleteShardsArgs{kv.config.Num, shards, kv.id, kv.requestId}
 						kv.requestId++
-						go kv.callDeleteShards(kv.config, &args, gid)
+						kv.callDeleteShards(kv.config, &args, gid)
 					} else {
 						allPull = false
 					}
@@ -590,6 +591,7 @@ func (kv *ShardKV) callPullShardData(newConfigNum int, gid int, shards []int) (b
 				for j := 0; j < 3; j++ {
 					var reply PullShardDataReply
 					ok := srv.Call("ShardKV.PullShardData", &args, &reply)
+					log.Printf("server:%s reply:%s", servers[si], toJsonString(reply))
 					if ok && reply.WrongLeader == false && (reply.Err == OK) {
 						return true, reply
 					} else if ok && reply.WrongLeader == false && reply.Err == ErrConfigNum {
