@@ -12,7 +12,10 @@ import "labrpc"
 import "crypto/rand"
 import "math/big"
 import "shardmaster"
-import "time"
+import (
+	"time"
+	"log"
+)
 
 //
 // which shard is a key in?
@@ -122,6 +125,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
+				log.Printf("group:%d id:%d putappend reply:%s", gid, ck.id, toJsonString(reply))
 				if ok && reply.WrongLeader == false && reply.Err == OK {
 					return
 				}
