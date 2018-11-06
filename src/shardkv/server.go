@@ -545,7 +545,7 @@ func (kv *ShardKV) handleConfig(newConfig shardmaster.Config) {
 
 		}
 
-		timeout:= waitTimeout(&wg, 10 *time.Millisecond)
+		timeout:= waitTimeout(&wg, 400 *time.Millisecond)
 
 		if allPull && !timeout {
 			var reconfigArgs ReconfigArgs
@@ -588,19 +588,12 @@ func (kv *ShardKV) callPullShardData(newConfigNum int, gid int, shards []int) (b
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
 				srv := kv.make_end(servers[si])
-				for j := 0; j < 3; j++ {
-					var reply PullShardDataReply
-					ok := srv.Call("ShardKV.PullShardData", &args, &reply)
-					log.Printf("server:%s reply:%s", servers[si], toJsonString(reply))
-					if ok && reply.WrongLeader == false && (reply.Err == OK) {
-						return true, reply
-					} else if ok && reply.WrongLeader == false && reply.Err == ErrConfigNum {
-						time.Sleep(10*time.Millisecond)
-					} else {
-						break
-					}
+				var reply PullShardDataReply
+				ok := srv.Call("ShardKV.PullShardData", &args, &reply)
+				log.Printf("server:%s reply:%s", servers[si], toJsonString(reply))
+				if ok && reply.WrongLeader == false && (reply.Err == OK) {
+					return true, reply
 				}
-
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
