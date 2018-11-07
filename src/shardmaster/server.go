@@ -275,16 +275,16 @@ func (sm *ShardMaster) rebalanceInMetux()  {
 
 	shardIdx := 0
 	for gid, _ := range sm.configs[lastIdx].Groups {
-		if _, ok := gcount[gid]; !ok || gcount[gid] < maxShards{
+		if _, ok := gcount[gid]; !ok || gcount[gid] < maxShards {
 			for ; shardIdx < NShards; shardIdx++ {
 				if sm.configs[lastIdx].Shards[shardIdx] == 0 {
-					if gcount[gid] + 1 <= avgShards {
+					if (gcount[gid] + 1) <= avgShards {
 						sm.configs[lastIdx].Shards[shardIdx] = gid
-						gcount[gid] += 1
+						gcount[gid]++
 					} else if (gcount[gid] + 1) == maxShards && 0 < reminder {
-						reminder--;
+						reminder--
 						sm.configs[lastIdx].Shards[shardIdx] = gid
-						gcount[gid] += 1
+						gcount[gid]++
 					} else {
 						break
 					}
@@ -292,6 +292,8 @@ func (sm *ShardMaster) rebalanceInMetux()  {
 			}
 		}
 	}
+
+
 }
 
 func (sm *ShardMaster) Apply(op Op, duplicate bool) interface{}   {

@@ -438,15 +438,23 @@ func (kv *ShardKV) applyReconfig(op Op) interface{} {
 		return reply
 	}
 
-	for sid, database := range args.StoredShards {
-		if 0 < len(kv.shardDatabase[sid]) && 0 < len(database) {
-			kv.shardDatabase[sid] = make(map[string]string)
+	if args.PartialUpdate {
+		for _, sid := range args.ShardIds {
+			if args.Config.Shards[sid] == kv.gid &&
+				kv.config.Shards[sid] != kv.gid {
+				database := args.StoredShards[sid]
+				if 0 < len(kv.shardDatabase[sid]) {
+					kv.shardDatabase[sid] = make(map[string]string)
+				}
+				unionMap(kv.shardDatabase[sid], database)
+				kv.config.Shards[sid] = kv.gid
+			}
 		}
-		unionMap(kv.shardDatabase[sid], database)
+		unionCommits(kv.clientsCommit, args.ClientsCommit)
+	} else {
+		kv.config = args.Config
+		log.Printf("group %d update %d config to %s", kv.gid, kv.id,toJsonString(kv.config))
 	}
-	unionCommits(kv.clientsCommit, args.ClientsCommit)
-	kv.config = args.Config
-	log.Printf("group %d update %d config to %s", kv.gid, kv.id,toJsonString(kv.config))
 	reply.Err = OK
 	return reply
 }
@@ -500,33 +508,36 @@ func (kv *ShardKV) DetectConfigChange()  {
 func (kv *ShardKV) handleConfig(newConfig shardmaster.Config) {
 	if kv.config.Num < newConfig.Num {
 		gshards := make(map[int][]int);
+		//kv.mu.Lock()
 		for sid, gid := range newConfig.Shards {
 			kvsgid := kv.config.Shards[sid]
 			if 0 < kvsgid && kv.gid == gid &&  kvsgid != gid {
 				gshards[kvsgid] = append(gshards[kvsgid], sid)
 			}
 		}
+		//kv.mu.Unlock()
 
-		var reconfigArgs ReconfigArgs
-		var reconfigMutex sync.Mutex
 		var wg sync.WaitGroup
 		allPull := true
-		reconfigArgs.Config = newConfig
-		reconfigArgs.ClientsCommit = make(map[int64]int64)
-		initialShards(&reconfigArgs.StoredShards)
 		for gid, shards := range gshards {
 			wg.Add(1)
 			go func(gid int, shards []int) {
 				defer wg.Done()
 				ok, reply := kv.callPullShardData(newConfig.Num, gid, shards)
-				log.Printf("%d received ok:%s, %s", kv.id, ok,  toJsonString(reply))
+				//log.Printf("group:%d-id:%d %d received from gid:%d ok:%t, %s",
+				//	kv.gid, kv.me, kv.id, gid, ok, toJsonString(reply))
 				if ok {
-					reconfigMutex.Lock()
-					for _, sid := range shards {
-						unionMap(reconfigArgs.StoredShards[sid], reply.StoredShards[sid])
+					var partialReply ReconfigReply
+					partialArgs := ReconfigArgs{newConfig, reply.StoredShards,
+					reply.ClientsCommit, shards,true}
+					kv.Reconfig(&partialArgs, &partialReply)
+					if OK == reply.Err {
+						args := DeleteShardsArgs{kv.config.Num, shards, kv.id, kv.requestId}
+						kv.requestId++
+						kv.callDeleteShards(kv.config, &args, gid)
+					} else {
+						allPull = false
 					}
-					unionCommits(reconfigArgs.ClientsCommit, reply.ClientsCommit)
-					reconfigMutex.Unlock()
 				} else {
 					allPull = false
 				}
@@ -534,26 +545,36 @@ func (kv *ShardKV) handleConfig(newConfig shardmaster.Config) {
 
 		}
 
-		wg.Wait()
-		if allPull {
-			oldConfig := kv.config
+		timeout:= waitTimeout(&wg, 400 *time.Millisecond)
+
+		if allPull && !timeout {
+			var reconfigArgs ReconfigArgs
+			reconfigArgs.Config = newConfig
+			reconfigArgs.PartialUpdate = false
+			reconfigArgs.ClientsCommit = make(map[int64]int64)
+			initialShards(&reconfigArgs.StoredShards)
 			var reply ReconfigReply
 			kv.Reconfig(&reconfigArgs, &reply)
-			if OK == reply.Err {
-				for gid, shards := range gshards {
-					go func(gid int, shards []int) {
-						args := DeleteShardsArgs{kv.config.Num, shards, kv.id, kv.requestId}
-						kv.requestId++
-						ok, reply := kv.callDeleteShards(oldConfig, &args, gid)
-						log.Printf("%d received ok:%s, %s", kv.id, ok,  toJsonString(reply))
-					}(gid, shards)
-
-				}
-
-			}
 		}
 	}
 }
+// waitTimeout waits for the waitgroup for the specified max timeout.
+// Returns true if waiting timed out.
+func waitTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
+	c := make(chan struct{})
+	go func() {
+		defer close(c)
+		wg.Wait()
+	}()
+	select {
+	case <-c:
+		return false // completed normally
+	case <-time.After(timeout):
+		return true // timed out
+	}
+}
+
+
 func initialShards(shardDb *[shardmaster.NShards]map[string]string) {
 	for i := 0; i < shardmaster.NShards; i++ {
 		shardDb[i] = make(map[string]string)
@@ -567,19 +588,14 @@ func (kv *ShardKV) callPullShardData(newConfigNum int, gid int, shards []int) (b
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
 				srv := kv.make_end(servers[si])
-				for j := 0; j < 3; j++ {
-					var reply PullShardDataReply
-					ok := srv.Call("ShardKV.PullShardData", &args, &reply)
-					if ok && reply.WrongLeader == false && (reply.Err == OK) {
-						return true, reply
-					} else if ok && reply.WrongLeader == false && reply.Err == ErrConfigNum {
-						time.Sleep(10*time.Millisecond)
-					} else {
-						break
-					}
+				var reply PullShardDataReply
+				ok := srv.Call("ShardKV.PullShardData", &args, &reply)
+				log.Printf("server:%s reply:%s", servers[si], toJsonString(reply))
+				if ok && reply.WrongLeader == false && (reply.Err == OK) {
+					return true, reply
 				}
-
 			}
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
 	return false, PullShardDataReply{}

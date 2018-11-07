@@ -74,9 +74,11 @@ type PullShardDataReply struct {
 }
 
 type ReconfigArgs struct {
-	Config		shardmaster.Config
-	StoredShards	[shardmaster.NShards]map[string]string
-	ClientsCommit	map[int64]int64
+	Config        shardmaster.Config
+	StoredShards  [shardmaster.NShards]map[string]string
+	ClientsCommit map[int64]int64
+	ShardIds      []int
+	PartialUpdate bool
 }
 
 type ReconfigReply struct {

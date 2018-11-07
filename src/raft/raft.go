@@ -476,9 +476,9 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
 
-const kLeaderHeartPeriod  = 40 * time.Millisecond
-const kMinElectTime = 300
-const kMaxElectTime = 500
+const kLeaderHeartPeriod  = 50 * time.Millisecond
+const kMinElectTime = 150
+const kMaxElectTime = 300
 
 func toJsonString(v interface{}) string{
 	b, err := json.Marshal(v)
