@@ -256,6 +256,9 @@ func (sm *ShardMaster) rebalanceInMetux()  {
 	reminder := NShards % groupNum
 	gcount := make(map[int]int)
 	for s, g := range sm.configs[lastIdx].Shards {
+		if 0 == g {
+			continue
+		}
 		if (gcount[g] + 1) <= avgShards {
 			gcount[g] += 1
 		}  else if (gcount[g] + 1) == maxShards {
@@ -272,12 +275,17 @@ func (sm *ShardMaster) rebalanceInMetux()  {
 
 	shardIdx := 0
 	for gid, _ := range sm.configs[lastIdx].Groups {
-		if _, ok := gcount[gid]; !ok || gcount[gid] < avgShards{
+		if _, ok := gcount[gid]; !ok || gcount[gid] < maxShards{
 			for ; shardIdx < NShards; shardIdx++ {
 				if sm.configs[lastIdx].Shards[shardIdx] == 0 {
-					sm.configs[lastIdx].Shards[shardIdx] = gid
-					gcount[gid]++
-					if avgShards <= gcount[gid] {
+					if gcount[gid] + 1 <= avgShards {
+						sm.configs[lastIdx].Shards[shardIdx] = gid
+						gcount[gid] += 1
+					} else if (gcount[gid] + 1) == maxShards && 0 < reminder {
+						reminder--;
+						sm.configs[lastIdx].Shards[shardIdx] = gid
+						gcount[gid] += 1
+					} else {
 						break
 					}
 				}
@@ -300,7 +308,9 @@ func (sm *ShardMaster) Apply(op Op, duplicate bool) interface{}   {
 			unionMaps(newConfig.Groups, args.Servers)
 			sm.configs = append(sm.configs, newConfig)
 			sm.rebalanceInMetux()
+			sm.clientsCommit[args.ClientId] = args.RequestId
 		}
+
 		return reply
 	case LeaveArgs:
 		var reply LeaveReply
@@ -314,6 +324,7 @@ func (sm *ShardMaster) Apply(op Op, duplicate bool) interface{}   {
 			sm.configs = append(sm.configs, newConfig)
 			sm.clearGidsInMetux(args.GIDs)
 			sm.rebalanceInMetux()
+			sm.clientsCommit[args.ClientId] = args.RequestId
 		}
 		return reply
 	case MoveArgs:
@@ -324,6 +335,7 @@ func (sm *ShardMaster) Apply(op Op, duplicate bool) interface{}   {
 			args := op.Args.(MoveArgs)
 			newConfig.Shards[args.Shard] = args.GID
 			sm.configs = append(sm.configs, newConfig)
+			sm.clientsCommit[args.ClientId] = args.RequestId
 		}
 		return reply
 	case QueryArgs:
@@ -399,6 +411,5 @@ func (sm *ShardMaster) IsDuplicate(clientId int64, requestId int64) bool {
 			return true
 		}
 	}
-	sm.clientsCommit[clientId] = requestId
 	return false
 }

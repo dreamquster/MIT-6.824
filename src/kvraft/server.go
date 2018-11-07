@@ -182,6 +182,9 @@ func (kv *RaftKV) Apply(op Op, duplicate bool) interface{} {
 		} else {
 			reply.Err = ErrNoKey
 		}
+		if kv.clientsCommit[args.ClientId] < args.RequestId {
+			kv.clientsCommit[args.ClientId] = args.RequestId
+		}
 		return reply
 	case PutAppendArgs:
 		var reply PutAppendReply
@@ -192,6 +195,7 @@ func (kv *RaftKV) Apply(op Op, duplicate bool) interface{} {
 			} else {
 				kv.database[args.Key] += args.Value
 			}
+			kv.clientsCommit[args.ClientId] = args.RequestId
 		}
 		reply.Err = OK
 		return  reply
@@ -205,7 +209,6 @@ func (kv *RaftKV) IsDuplicate(clientId int64, requestId int64) bool {
 			return true
 		}
 	}
-	kv.clientsCommit[clientId] = requestId
 	return false
 }
 func (kv *RaftKV) SendResult(msgIdx int, result Result) {
