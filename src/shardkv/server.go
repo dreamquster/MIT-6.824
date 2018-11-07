@@ -590,7 +590,7 @@ func (kv *ShardKV) callPullShardData(newConfigNum int, gid int, shards []int) (b
 				srv := kv.make_end(servers[si])
 				var reply PullShardDataReply
 				ok := srv.Call("ShardKV.PullShardData", &args, &reply)
-				log.Printf("server:%s reply:%s", servers[si], toJsonString(reply))
+				//log.Printf("server:%s reply:%s", servers[si], toJsonString(reply))
 				if ok && reply.WrongLeader == false && (reply.Err == OK) {
 					return true, reply
 				}
